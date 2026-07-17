@@ -1,0 +1,118 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+const bcrypt = require('bcryptjs');
+const { decrypt } = require('./crypto');
+
+const DB_PATH = path.join(__dirname, '..', 'data', 'vms.db');
+const db = new Database(DB_PATH);
+
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'operator',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS cameras (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  brand TEXT,
+  ip TEXT NOT NULL,
+  rtsp_port INTEGER DEFAULT 554,
+  onvif_port INTEGER DEFAULT 80,
+  username TEXT,
+  password TEXT,
+  rtsp_path TEXT,
+  rtsp_url TEXT,
+  ptz_supported INTEGER DEFAULT 0,
+  recording_enabled INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS recordings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  camera_id INTEGER NOT NULL,
+  filename TEXT NOT NULL,
+  started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  size_bytes INTEGER DEFAULT 0,
+  FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  camera_id INTEGER,
+  type TEXT NOT NULL,
+  message TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS locations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  address TEXT,
+  lat REAL NOT NULL,
+  lng REAL NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Simple key/value store for settings editable from the Pengaturan page
+-- (SMTP, branding, retention, ...) so changing them doesn't require editing
+-- .env and restarting the process.
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+`);
+
+function ensureColumn(table, name, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  const exists = columns.some((col) => col.name === name);
+  if (!exists) {
+    db.prepare(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`).run();
+  }
+}
+
+ensureColumn('cameras', 'motion_detection_enabled', 'INTEGER DEFAULT 0');
+ensureColumn('cameras', 'motion_sensitivity', 'REAL DEFAULT 0.04');
+ensureColumn('cameras', 'motion_recording_enabled', 'INTEGER DEFAULT 0');
+ensureColumn('cameras', 'motion_last_triggered_at', 'INTEGER DEFAULT 0');
+ensureColumn('cameras', 'location_id', 'INTEGER REFERENCES locations(id) ON DELETE SET NULL');
+ensureColumn('cameras', 'sort_order', 'INTEGER DEFAULT 0');
+ensureColumn('cameras', 'is_relay', 'INTEGER DEFAULT 0');
+ensureColumn('cameras', 'relay_token', 'TEXT');
+ensureColumn('cameras', 'building', 'TEXT');
+ensureColumn('events', 'acknowledged', 'INTEGER DEFAULT 0');
+
+function seedAdmin() {
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME || 'admin');
+  if (!existing) {
+    const hash = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10);
+    db.prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)')
+      .run(process.env.ADMIN_USERNAME || 'admin', hash, 'admin');
+    console.log(`[db] Seeded admin user "${process.env.ADMIN_USERNAME || 'admin'}"`);
+  }
+}
+
+function logEvent(cameraId, type, message) {
+  db.prepare('INSERT INTO events (camera_id, type, message) VALUES (?, ?, ?)').run(cameraId, type, message);
+}
+
+// password and rtsp_url (which embeds the same password) are stored
+// encrypted at rest — this is the one place that decrypts them, so every
+// caller that needs to actually connect to the camera (ffmpeg, ONVIF) goes
+// through here instead of reading the raw row and risking a spot that
+// forgets to decrypt.
+function decryptCamera(cam) {
+  if (!cam) return cam;
+  return { ...cam, password: decrypt(cam.password), rtsp_url: decrypt(cam.rtsp_url) };
+}
+
+function getCameraById(id) {
+  return decryptCamera(db.prepare('SELECT * FROM cameras WHERE id = ?').get(id));
+}
+
+module.exports = { db, seedAdmin, logEvent, decryptCamera, getCameraById };

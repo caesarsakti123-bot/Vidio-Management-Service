@@ -1,0 +1,33 @@
+services:
+  open-vms:
+    build: .
+    container_name: open-vms
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - JWT_SECRET=${JWT_SECRET:-ganti-dengan-string-acak-yang-panjang}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      # No default on purpose — camera passwords/RTSP URLs are AES-256-GCM
+      # encrypted with this key. A silent default here would either be a
+      # publicly-known secret or (worse) change on every redeploy, making
+      # every stored camera credential permanently undecryptable. Compose
+      # exits with an error instead if it's missing from .env.
+      - CAMERA_ENCRYPTION_KEY=${CAMERA_ENCRYPTION_KEY:?Wajib diisi di .env — generate dengan: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"}
+      - RETENTION_DAYS=${RETENTION_DAYS:-14}
+      - FFMPEG_PATH=ffmpeg
+      - STREAM_MAX_WIDTH=${STREAM_MAX_WIDTH:-960}
+      - STREAM_FPS=${STREAM_FPS:-15}
+      # No GPU device passthrough by default, so hardware encoding isn't
+      # available in-container. Set to "auto" only if you've mapped
+      # /dev/dri (Intel) or an NVIDIA runtime into this container.
+      - HWACCEL_MODE=${HWACCEL_MODE:-software}
+    volumes:
+      - ./data:/app/data
+      - ./recordings:/app/recordings
+      - ./public/streams:/app/public/streams
+    # Cameras are typically on the local LAN, so network_mode: host
+    # is often simplest in production (uncomment if needed):
+    # network_mode: host

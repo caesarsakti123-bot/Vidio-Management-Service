@@ -1,0 +1,2217 @@
+const state = {
+  token: localStorage.getItem('vms_token') || null,
+  user: JSON.parse(localStorage.getItem('vms_user') || '{}'),
+  cameras: [],
+  players: new Map(), // cameraId -> Hls instance
+  pollTimer: null,
+  layout: localStorage.getItem('vms_layout') || 'auto',
+  layoutPage: 0,
+  spotlightMainId: null,
+  alertPollTimer: null,
+  locations: [],
+  locationFilter: null,
+  buildingFilter: null, // { locationId, building } | null
+  treeExpanded: new Set(),
+  statusFilter: null, // null | 'active' | 'inactive'
+  capabilityFilter: null, // null | 'ptz' | 'motion' | 'recording' | 'relay'
+  cameraSearch: '',
+};
+
+const $ = (sel) => document.querySelector(sel);
+const api = async (path, opts = {}) => {
+  const res = await fetch(`/api${path}`, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+      ...(opts.headers || {}),
+    },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+  return data;
+};
+
+// ---- Auth ----
+
+$('#login-btn').addEventListener('click', async () => {
+  const username = $('#login-username').value.trim();
+  const password = $('#login-password').value;
+  $('#login-error').textContent = '';
+  try {
+    const data = await api('/auth/login', { method: 'POST', body: { username, password } });
+    state.token = data.token;
+    state.user = data.user;
+    localStorage.setItem('vms_token', data.token);
+    localStorage.setItem('vms_user', JSON.stringify(data.user));
+    enterApp();
+  } catch (e) {
+    $('#login-error').textContent = e.message;
+  }
+});
+
+function enterApp() {
+  $('#login-screen').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  state.user = JSON.parse(localStorage.getItem('vms_user') || '{}');
+  $('#whoami').textContent = state.user.username ? `Masuk sebagai ${state.user.username} (${state.user.role})` : '';
+  renderNavForRole();
+  loadLocations();
+  loadCameras();
+  loadRecordings();
+  loadEvents();
+  loadDashboard();
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(loadCameras, 15000);
+  refreshAlertBadge();
+  if (state.alertPollTimer) clearInterval(state.alertPollTimer);
+  state.alertPollTimer = setInterval(refreshAlertBadge, 20000);
+}
+
+function logout() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = null;
+  if (state.alertPollTimer) clearInterval(state.alertPollTimer);
+  state.alertPollTimer = null;
+  for (const id of state.players.keys()) stopPlayer(id);
+  state.token = null;
+  state.user = {};
+  state.cameras = [];
+  localStorage.removeItem('vms_token');
+  localStorage.removeItem('vms_user');
+  $('#login-username').value = '';
+  $('#login-password').value = '';
+  $('#login-error').textContent = '';
+  $('#app').classList.add('hidden');
+  $('#login-screen').classList.remove('hidden');
+}
+
+$('#logout-btn').addEventListener('click', logout);
+
+function renderNavForRole() {
+  $('#add-camera-btn').style.display = state.user.role === 'viewer' ? 'none' : 'inline-block';
+  document.querySelectorAll('.nav-item[data-view="users"], .nav-item[data-view="settings"]').forEach((item) => {
+    item.style.display = state.user.role === 'admin' ? 'block' : 'none';
+  });
+}
+
+// ---- Branding (app name / logo) ----
+
+function applyBranding(data) {
+  if (!data) return;
+  const name = data.app_name || 'Open VMS';
+  const nameEls = [$('#sidebar-app-name'), $('#login-app-name')];
+  nameEls.forEach((el) => { if (el) el.textContent = name; });
+  document.title = `${name} — Unified Video Management`;
+
+  if (data.logo_path) {
+    const imgHtml = `<img src="${data.logo_path}" alt="${escapeHtml(name)}" />`;
+    const sidebarMark = $('#sidebar-brand-mark');
+    const loginLogo = $('#login-logo');
+    if (sidebarMark) sidebarMark.innerHTML = imgHtml;
+    if (loginLogo) loginLogo.innerHTML = imgHtml;
+  }
+}
+
+async function loadBranding() {
+  try {
+    const res = await fetch('/api/branding');
+    applyBranding(await res.json());
+  } catch (e) { console.error(e); }
+}
+loadBranding();
+
+let usersCache = [];
+
+async function loadUsers() {
+  try {
+    usersCache = await api('/users');
+    const tbody = $('#users-table');
+    if (!tbody) return;
+    tbody.innerHTML = usersCache.map((user) => `
+      <tr>
+        <td>${escapeHtml(user.username)}</td>
+        <td>${escapeHtml(user.role)}</td>
+        <td>${new Date(user.created_at).toLocaleString('id-ID')}</td>
+        <td class="row-actions">
+          <button data-user-action="edit" data-id="${user.id}">Edit</button>
+          ${user.id !== state.user.id ? `<button class="danger" data-user-action="delete" data-id="${user.id}">Hapus</button>` : ''}
+        </td>
+      </tr>
+    `).join('') || '<tr><td colspan="4" style="color:var(--text-dim)">Belum ada user</td></tr>';
+
+    tbody.querySelectorAll('[data-user-action]').forEach((btn) => {
+      btn.addEventListener('click', () => handleUserAction(btn.dataset.userAction, Number(btn.dataset.id)));
+    });
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+let editingUserId = null;
+
+function openUserModal(user) {
+  editingUserId = user ? user.id : null;
+  $('#user-modal-title').textContent = user ? `Edit user: ${user.username}` : 'Tambah user';
+  $('#user-username').value = user ? user.username : '';
+  $('#user-username').disabled = !!user;
+  $('#user-password').value = '';
+  $('#user-password-label').textContent = user ? 'Password baru (kosongkan jika tidak diubah)' : 'Password';
+  $('#user-role').value = user ? user.role : 'viewer';
+  $('#user-form-msg').textContent = '';
+  $('#user-form-msg').className = 'form-msg';
+  $('#user-modal').classList.remove('hidden');
+}
+
+function closeUserModal() {
+  $('#user-modal').classList.add('hidden');
+  editingUserId = null;
+}
+
+async function handleUserAction(action, id) {
+  const user = usersCache.find((u) => u.id === id);
+  if (!user) return;
+  if (action === 'edit') {
+    openUserModal(user);
+  } else if (action === 'delete') {
+    if (!confirm(`Hapus user "${user.username}"?`)) return;
+    try {
+      await api(`/users/${id}`, { method: 'DELETE' });
+      await loadUsers();
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+}
+
+$('#add-user-btn')?.addEventListener('click', () => openUserModal(null));
+$('#user-cancel-btn').addEventListener('click', closeUserModal);
+
+$('#user-save-btn').addEventListener('click', async () => {
+  const msg = $('#user-form-msg');
+  msg.className = 'form-msg';
+  msg.textContent = '';
+  const username = $('#user-username').value.trim();
+  const password = $('#user-password').value;
+  const role = $('#user-role').value;
+
+  try {
+    if (editingUserId) {
+      const body = { role };
+      if (password) body.password = password;
+      await api(`/users/${editingUserId}`, { method: 'PUT', body });
+    } else {
+      if (!username || !password) throw new Error('Username dan password wajib diisi');
+      await api('/users', { method: 'POST', body: { username, password, role } });
+    }
+    msg.textContent = 'User tersimpan';
+    msg.classList.add('ok');
+    setTimeout(() => {
+      closeUserModal();
+      loadUsers();
+    }, 500);
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('error');
+  }
+});
+
+if (state.token) enterApp();
+
+// ---- Navigation ----
+
+document.querySelectorAll('.nav-item').forEach((item) => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach((i) => i.classList.remove('active'));
+    item.classList.add('active');
+    ['dashboard', 'live', 'map', 'recordings', 'events', 'users', 'settings'].forEach((v) => {
+      $(`#view-${v}`)?.classList.toggle('hidden', v !== item.dataset.view);
+    });
+    if (item.dataset.view === 'dashboard') loadDashboard();
+    if (item.dataset.view === 'recordings') loadRecordings();
+    if (item.dataset.view === 'events') loadEvents();
+    if (item.dataset.view === 'users') loadUsers();
+    if (item.dataset.view === 'map') showMapView();
+    if (item.dataset.view === 'settings') loadSettingsPage();
+  });
+});
+
+// ---- Camera grid ----
+
+async function loadCameras() {
+  try {
+    state.cameras = await api('/cameras');
+    renderStatusFilters();
+    renderLocationTree();
+    renderGrid();
+    if (focusCameraId && !$('#focus-modal').classList.contains('hidden')) {
+      const cam = state.cameras.find((c) => c.id === focusCameraId);
+      if (cam) renderFocusModal(cam);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function reorderCameras(draggedId, targetId) {
+  if (draggedId === targetId) return;
+  const fromIdx = state.cameras.findIndex((c) => c.id === draggedId);
+  const toIdx = state.cameras.findIndex((c) => c.id === targetId);
+  if (fromIdx === -1 || toIdx === -1) return;
+
+  // Move within the full camera list (not just the visible/filtered subset)
+  // so ordering stays consistent across filters and pages, then renumber
+  // sequentially. Renumbering (rather than reusing old sort_order values)
+  // also self-heals cameras that still share the same default sort_order.
+  const reordered = [...state.cameras];
+  const [moved] = reordered.splice(fromIdx, 1);
+  const newToIdx = reordered.findIndex((c) => c.id === targetId);
+  reordered.splice(newToIdx, 0, moved);
+  reordered.forEach((c, i) => { c.sort_order = i; });
+  state.cameras = reordered;
+  renderGrid();
+
+  try {
+    await api('/cameras/reorder', {
+      method: 'PUT',
+      body: { items: reordered.map((c) => ({ id: c.id, sort_order: c.sort_order })) },
+    });
+  } catch (e) {
+    console.error('Gagal menyimpan urutan kamera:', e.message);
+    await loadCameras();
+  }
+}
+
+// Fixed-slot layouts show a set number of tiles per "page" and pad any
+// remaining slots with placeholders, like a real VMS layout preset.
+// 'auto' keeps the original responsive wrap with no slot limit.
+const LAYOUTS = {
+  auto: { slots: null },
+  '1x1': { slots: 1 },
+  '2x2': { slots: 4 },
+  '3x3': { slots: 9 },
+  '4x4': { slots: 16 },
+  spotlight: { slots: 6 },
+};
+
+function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
+  const tile = document.createElement('div');
+  tile.className = 'tile' + (isSpotlightMain ? ' spotlight-main' : '');
+  tile.dataset.camId = cam.id;
+  const canEdit = state.user.role !== 'viewer';
+
+  if (enableDrag && canEdit) {
+    tile.draggable = true;
+    tile.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(cam.id));
+      tile.classList.add('dragging');
+    });
+    tile.addEventListener('dragend', () => tile.classList.remove('dragging'));
+    tile.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      tile.classList.add('drag-over');
+    });
+    tile.addEventListener('dragleave', () => tile.classList.remove('drag-over'));
+    tile.addEventListener('drop', (e) => {
+      e.preventDefault();
+      tile.classList.remove('drag-over');
+      const draggedId = Number(e.dataTransfer.getData('text/plain'));
+      reorderCameras(draggedId, cam.id);
+    });
+  }
+
+  const camLocation = state.locations.find((l) => l.id === cam.location_id);
+  const hasMenuItems = tileActionMenuItems(cam).length > 0;
+
+  tile.innerHTML = `
+    <div class="tile-video">
+      <video id="video-${cam.id}" muted playsinline></video>
+      <div class="placeholder ${cam.stream.active ? 'hidden' : ''}" id="placeholder-${cam.id}">${cam.rtsp_url ? (cam.stream.reconnecting ? 'Menyambung ulang...' : 'Klik "Live" untuk mulai menonton') : 'RTSP belum diatur — lakukan ONVIF probe'}</div>
+      <div class="status-badge">
+        <span class="status-pill ${cam.stream.active ? 'live-on' : (cam.stream.reconnecting ? 'reconnecting' : '')}"><span class="status-dot live"></span>${cam.stream.reconnecting && !cam.stream.active ? 'Reconnecting' : 'Live'}</span>
+        <span class="status-pill ${cam.recording_active ? 'rec-on' : ''}"><span class="status-dot rec"></span>Rec</span>
+        <span class="status-pill ${cam.motion_active ? 'motion-on' : ''}"><span class="status-dot motion"></span>Motion</span>
+      </div>
+      ${enableDrag && canEdit ? `<div class="drag-handle" title="Seret untuk atur urutan"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg></div>` : ''}
+      ${isSpotlightSidebar ? `
+      <button class="promote-btn" data-action="promote" data-id="${cam.id}" title="Jadikan kamera utama">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+      </button>` : ''}
+    </div>
+    <div class="tile-info">
+      <div>
+        <div class="name">${escapeHtml(cam.name)} ${cam.is_relay ? '<span class="relay-badge" title="Video dikirim via agen relay, bukan konek langsung">📡 Relay</span>' : ''}</div>
+        <div class="brand">${escapeHtml(cam.brand || 'Tidak diketahui')} · ${cam.ip}</div>
+        ${cam.location_id ? `<div class="location-tag">📍 ${escapeHtml(camLocation?.name || 'Lokasi tidak dikenal')}</div>` : ''}
+        ${camLocation?.address ? `<div class="location-address">${escapeHtml(camLocation.address)}</div>` : ''}
+        <div class="meta">Motion: ${cam.motion_detection_enabled ? 'ON' : 'OFF'} · Sensitivitas: ${cam.motion_sensitivity || 0.04}</div>
+      </div>
+      ${hasMenuItems ? `
+      <button class="tile-menu-btn" data-menu-toggle="${cam.id}" title="Menu aksi" aria-label="Menu aksi">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>` : ''}
+    </div>
+    ${cam.ptz_supported ? `
+    <div class="ptz-grid">
+      <span></span><button data-ptz="up" data-id="${cam.id}">▲</button><span></span>
+      <button data-ptz="left" data-id="${cam.id}">◀</button>
+      <button data-ptz="stop" data-id="${cam.id}">■</button>
+      <button data-ptz="right" data-id="${cam.id}">▶</button>
+      <span></span><button data-ptz="down" data-id="${cam.id}">▼</button><span></span>
+    </div>` : ''}
+  `;
+
+  tile.querySelector('.tile-video').addEventListener('click', (e) => {
+    if (e.target.closest('button, .drag-handle')) return;
+    openFocusView(cam.id);
+  });
+
+  return tile;
+}
+
+function buildEmptyTile(isSpotlightMain) {
+  const el = document.createElement('div');
+  el.className = 'tile tile-empty' + (isSpotlightMain ? ' spotlight-main' : '');
+  el.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l4.55-2.28A1 1 0 0 1 21 8.62v6.76a1 1 0 0 1-1.45.9L15 14"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg>
+    <span>Slot kosong</span>
+  `;
+  return el;
+}
+
+// ---- Per-tile "..." action menu ----
+// A single shared popup (appended to <body>, not the tile) is reused for
+// every tile — a menu nested inside .tile would get clipped by the tile's
+// own `overflow: hidden` (needed to round the video's square corners), and
+// grid tiles rebuild from scratch on every 15s poll anyway.
+
+function tileActionMenuItems(cam) {
+  const canEdit = state.user.role !== 'viewer';
+  const items = cam.is_relay
+    ? [
+        canEdit && { action: 'edit', label: 'Edit' },
+        canEdit && { action: 'relay-info', label: 'Info Agen' },
+        state.user.role === 'admin' && { action: 'delete', label: 'Hapus', danger: true },
+      ]
+    : [
+        { action: 'stream', label: cam.stream.active ? 'Stop live' : 'Live' },
+        { action: 'record', label: cam.recording_active ? 'Stop rekam' : 'Rekam' },
+        { action: 'probe', label: 'Probe ONVIF' },
+        canEdit && { action: 'edit', label: 'Edit' },
+        state.user.role !== 'viewer' && { action: 'motion', label: cam.motion_detection_enabled ? 'Matikan Motion' : 'Hidupkan Motion' },
+        state.user.role === 'admin' && { action: 'delete', label: 'Hapus', danger: true },
+      ];
+  return items.filter(Boolean);
+}
+
+function hideTileActionMenu() {
+  const menu = $('#tile-action-menu');
+  if (menu) {
+    menu.classList.add('hidden');
+    delete menu.dataset.openFor;
+  }
+}
+
+function toggleTileActionMenu(btn, camId) {
+  const menu = $('#tile-action-menu');
+  if (!menu) return;
+  const wasOpenForThis = !menu.classList.contains('hidden') && menu.dataset.openFor === String(camId);
+  hideTileActionMenu();
+  if (wasOpenForThis) return; // clicking the same "..." again just closes it
+
+  const cam = state.cameras.find((c) => c.id === camId);
+  if (!cam) return;
+  menu.innerHTML = tileActionMenuItems(cam)
+    .map((m) => `<button data-action="${m.action}" data-id="${cam.id}"${m.danger ? ' class="danger"' : ''}>${m.label}</button>`)
+    .join('');
+  menu.dataset.openFor = String(camId);
+  menu.classList.remove('hidden');
+
+  // Measure after the content is in and visible so we can keep the menu on
+  // screen — with dense grid layouts (video-wall style, many columns of
+  // small tiles) a naive bottom-right anchor regularly pushes it past the
+  // viewport edge for tiles in the last row or the leftmost column.
+  const rect = btn.getBoundingClientRect();
+  const menuWidth = menu.offsetWidth;
+  const menuHeight = menu.offsetHeight;
+  const openUpward = window.innerHeight - rect.bottom < menuHeight + 12 && rect.top > menuHeight + 12;
+  const right = Math.max(8, Math.min(window.innerWidth - rect.right, window.innerWidth - menuWidth - 8));
+
+  menu.style.left = 'auto';
+  menu.style.right = `${right}px`;
+  menu.style.top = openUpward ? `${Math.max(8, rect.top - 6 - menuHeight)}px` : `${rect.bottom + 6}px`;
+}
+
+// Delegated on the container itself (not its buttons) so it survives the
+// innerHTML rebuild every time the menu is (re)opened for a different tile.
+$('#tile-action-menu')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  hideTileActionMenu();
+  handleTileAction(btn.dataset.action, Number(btn.dataset.id));
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#tile-action-menu') && !e.target.closest('[data-menu-toggle]')) hideTileActionMenu();
+});
+window.addEventListener('scroll', hideTileActionMenu, true);
+window.addEventListener('resize', hideTileActionMenu);
+
+function updateLayoutPager(page, totalPages, remainingAfterThisPage) {
+  const pager = $('#layout-pager');
+  if (!pager) return;
+  if (!totalPages || totalPages <= 1) {
+    pager.classList.add('hidden');
+    return;
+  }
+  pager.classList.remove('hidden');
+  const label = `Halaman ${page + 1}/${totalPages}`;
+  $('#layout-page-label').textContent = remainingAfterThisPage > 0
+    ? `${label} · ${remainingAfterThisPage} kamera lagi →`
+    : label;
+  $('#layout-prev').disabled = page === 0;
+  $('#layout-next').disabled = page >= totalPages - 1;
+}
+
+function renderGrid() {
+  const grid = $('#camera-grid');
+  const playingIds = [...state.players.keys()];
+  hideTileActionMenu(); // tiles/buttons below are about to be torn down and rebuilt
+  grid.innerHTML = '';
+  grid.className = `grid layout-${state.layout}`;
+
+  document.querySelectorAll('#layout-picker .layout-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.layout === state.layout);
+  });
+
+  if (state.cameras.length === 0) {
+    grid.innerHTML = '<div class="empty-state">Belum ada kamera. Klik "Tambah kamera" untuk memulai.</div>';
+    for (const id of playingIds) {
+      const hls = state.players.get(id);
+      if (hls) hls.destroy();
+    }
+    state.players.clear();
+    updateLayoutPager(0, 0);
+    return;
+  }
+
+  const filteredCameras = getVisibleCameras();
+  if (filteredCameras.length === 0) {
+    const emptyMsg = state.cameraSearch.trim()
+      ? `Tidak ada kamera yang cocok dengan pencarian "${escapeHtml(state.cameraSearch.trim())}".`
+      : 'Tidak ada kamera di lokasi ini.';
+    grid.innerHTML = `<div class="empty-state">${emptyMsg}</div>`;
+    for (const id of playingIds) {
+      const hls = state.players.get(id);
+      if (hls) hls.destroy();
+    }
+    state.players.clear();
+    updateLayoutPager(0, 0);
+    return;
+  }
+
+  const layoutDef = LAYOUTS[state.layout] || LAYOUTS.auto;
+  const slotCount = layoutDef.slots;
+  let camerasToShow = filteredCameras;
+
+  if (slotCount) {
+    const totalPages = Math.max(1, Math.ceil(filteredCameras.length / slotCount));
+    if (state.layoutPage >= totalPages) state.layoutPage = totalPages - 1;
+    if (state.layoutPage < 0) state.layoutPage = 0;
+    const start = state.layoutPage * slotCount;
+    camerasToShow = filteredCameras.slice(start, start + slotCount);
+    updateLayoutPager(state.layoutPage, totalPages, filteredCameras.length - (start + camerasToShow.length));
+  } else {
+    updateLayoutPager(0, 0);
+  }
+
+  if (state.layout === 'spotlight') {
+    const mainCam = camerasToShow.find((c) => c.id === state.spotlightMainId) || camerasToShow[0];
+    const others = camerasToShow.filter((c) => c !== mainCam);
+
+    grid.appendChild(mainCam ? buildCameraTile(mainCam, true, false, false) : buildEmptyTile(true));
+    const sidebar = document.createElement('div');
+    sidebar.className = 'spotlight-sidebar';
+    for (let i = 0; i < slotCount - 1; i++) {
+      sidebar.appendChild(others[i] ? buildCameraTile(others[i], false, true, false) : buildEmptyTile(false));
+    }
+    grid.appendChild(sidebar);
+  } else {
+    camerasToShow.forEach((cam) => grid.appendChild(buildCameraTile(cam, false, false, true)));
+    if (slotCount) {
+      for (let i = camerasToShow.length; i < slotCount; i++) {
+        grid.appendChild(buildEmptyTile(false));
+      }
+    }
+  }
+
+  grid.querySelectorAll('button[data-action]').forEach((btn) => {
+    btn.addEventListener('click', () => handleTileAction(btn.dataset.action, Number(btn.dataset.id)));
+  });
+  grid.querySelectorAll('[data-ptz]').forEach((btn) => {
+    const move = () => sendPtz(Number(btn.dataset.id), btn.dataset.ptz);
+    btn.addEventListener('mousedown', move);
+    btn.addEventListener('mouseup', () => sendPtz(Number(btn.dataset.id), 'stop'));
+    btn.addEventListener('mouseleave', () => sendPtz(Number(btn.dataset.id), 'stop'));
+  });
+  grid.querySelectorAll('[data-menu-toggle]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleTileActionMenu(btn, Number(btn.dataset.menuToggle));
+    });
+  });
+
+  // The tiles above were just rebuilt from scratch, which replaced any <video>
+  // elements a running hls.js player was attached to. Re-attach playback for
+  // cameras whose stream is still active so it survives grid re-renders
+  // (triggered right after starting a stream, on every poll interval, and on
+  // layout/page switches) — and also pick up streams that are active
+  // server-side but weren't started from this browser tab (e.g. still
+  // running from before a page reload, or started by another operator), so
+  // their tile shows live video instead of sitting blank even though the
+  // status badge says active.
+  const activeIds = new Set(playingIds);
+  for (const cam of camerasToShow) {
+    if (cam.stream.active) activeIds.add(cam.id);
+  }
+  for (const id of activeIds) {
+    const cam = state.cameras.find((c) => c.id === id);
+    const videoExists = !!document.getElementById(`video-${id}`);
+    if (cam && cam.stream.active && videoExists) {
+      startPlayer(id, `/streams/${id}/index.m3u8`);
+    } else {
+      const hls = state.players.get(id);
+      if (hls) hls.destroy();
+      state.players.delete(id);
+    }
+  }
+}
+
+$('#layout-picker')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.layout-btn');
+  if (!btn) return;
+  state.layout = btn.dataset.layout;
+  state.layoutPage = 0;
+  localStorage.setItem('vms_layout', state.layout);
+  renderGrid();
+});
+
+$('#layout-prev')?.addEventListener('click', () => {
+  state.layoutPage = Math.max(0, state.layoutPage - 1);
+  renderGrid();
+});
+
+$('#layout-next')?.addEventListener('click', () => {
+  state.layoutPage += 1;
+  renderGrid();
+});
+
+async function handleTileAction(action, id) {
+  if (action === 'promote') {
+    state.spotlightMainId = id;
+    renderGrid();
+    return;
+  }
+
+  const cam = state.cameras.find((c) => c.id === id);
+
+  if (action === 'edit') {
+    openCameraModal(cam);
+    return;
+  }
+
+  if (action === 'relay-info') {
+    if (!cam.relay_token) {
+      alert('Token relay tidak tersedia (perlu role admin/operator untuk melihatnya).');
+      return;
+    }
+    if (!cam.rtsp_url) {
+      alert(`Kamera "${cam.name}" belum punya RTSP path. Edit kamera ini dan isi RTSP path manual dulu (Probe ONVIF tidak tersedia untuk kamera relay).`);
+      return;
+    }
+    const cmd = `node relay-agent.js --server=${window.location.origin} --token=${cam.relay_token} --rtsp="${cam.rtsp_url}"`;
+    prompt(`Perintah agen untuk "${cam.name}" — jalankan ini di PC pada jaringan lokal kamera:`, cmd);
+    return;
+  }
+
+  try {
+    if (action === 'stream') {
+      if (cam.stream.active) {
+        await api(`/cameras/${id}/stream/stop`, { method: 'POST' });
+        stopPlayer(id);
+      } else {
+        const res = await api(`/cameras/${id}/stream/start`, { method: 'POST' });
+        startPlayer(id, res.playlist);
+      }
+    } else if (action === 'record') {
+      await api(`/cameras/${id}/recording/${cam.recording_active ? 'stop' : 'start'}`, { method: 'POST' });
+    } else if (action === 'probe') {
+      $(`#placeholder-${id}`).textContent = 'Menghubungi kamera via ONVIF...';
+      const info = await api(`/cameras/${id}/onvif/probe`, { method: 'POST' });
+      $(`#placeholder-${id}`).textContent = `Terhubung: ${info.manufacturer || ''} ${info.model || ''}`.trim();
+    } else if (action === 'delete') {
+      if (!confirm(`Hapus kamera "${cam.name}"?`)) return;
+      await api(`/cameras/${id}`, { method: 'DELETE' });
+    } else if (action === 'motion') {
+      await api(`/cameras/${id}`, {
+        method: 'PUT',
+        body: {
+          motion_detection_enabled: !cam.motion_detection_enabled,
+          motion_sensitivity: cam.motion_sensitivity || 0.04,
+          motion_recording_enabled: cam.motion_recording_enabled,
+        },
+      });
+    }
+    await loadCameras();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function sendPtz(id, direction) {
+  const map = {
+    up: { pan: 0, tilt: 0.5 },
+    down: { pan: 0, tilt: -0.5 },
+    left: { pan: -0.5, tilt: 0 },
+    right: { pan: 0.5, tilt: 0 },
+    stop: null,
+  };
+  try {
+    if (direction === 'stop') {
+      await api(`/cameras/${id}/ptz`, { method: 'POST', body: { action: 'stop' } });
+    } else {
+      await api(`/cameras/${id}/ptz`, { method: 'POST', body: { action: 'move', ...map[direction] } });
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function startPlayer(id, playlistUrl) {
+  const video = $(`#video-${id}`);
+  if (!video) return;
+  stopPlayer(id); // avoid orphaned hls.js instances piling up across re-renders
+  $(`#placeholder-${id}`)?.classList.add('hidden');
+  if (Hls.isSupported()) {
+    const hls = new Hls();
+    hls.loadSource(playlistUrl);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.ERROR, (_evt, data) => {
+      if (!data.fatal) return;
+      stopPlayer(id);
+      const placeholder = $(`#placeholder-${id}`);
+      if (!placeholder) return;
+      placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
+      placeholder.classList.remove('hidden');
+      setTimeout(() => {
+        const cam = state.cameras.find((c) => c.id === id);
+        if (cam?.stream?.active && $(`#video-${id}`)) startPlayer(id, playlistUrl);
+      }, 3000);
+    });
+    video.play().catch(() => {});
+    state.players.set(id, hls);
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = playlistUrl;
+    video.play().catch(() => {});
+  }
+}
+
+function stopPlayer(id) {
+  const hls = state.players.get(id);
+  if (hls) {
+    hls.destroy();
+    state.players.delete(id);
+  }
+}
+
+// ---- Focus view (click a camera tile to enlarge it) ----
+
+let focusHls = null;
+let focusCameraId = null;
+
+function openFocusView(cameraId) {
+  const cam = state.cameras.find((c) => c.id === cameraId);
+  if (!cam) return;
+  focusCameraId = cameraId;
+  $('#focus-modal').classList.remove('hidden');
+  renderFocusModal(cam);
+}
+
+function closeFocusView() {
+  if (focusHls) {
+    focusHls.destroy();
+    focusHls = null;
+  }
+  const video = $('#focus-video');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  $('#focus-modal').classList.add('hidden');
+  focusCameraId = null;
+}
+
+function renderFocusModal(cam) {
+  const camLocation = state.locations.find((l) => l.id === cam.location_id);
+  $('#focus-title').textContent = cam.name;
+  $('#focus-subtitle').textContent = `${cam.brand || 'Tidak diketahui'} · ${cam.ip}` + (camLocation?.address ? ` · ${camLocation.address}` : '');
+
+  $('#focus-status-live').className = 'status-pill' + (cam.stream.active ? ' live-on' : (cam.stream.reconnecting ? ' reconnecting' : ''));
+  $('#focus-status-live').lastChild.textContent = cam.stream.reconnecting && !cam.stream.active ? 'Reconnecting' : 'Live';
+  $('#focus-status-rec').className = 'status-pill' + (cam.recording_active ? ' rec-on' : '');
+  $('#focus-status-motion').className = 'status-pill' + (cam.motion_active ? ' motion-on' : '');
+
+  $('#focus-stream-btn').textContent = cam.stream.active ? 'Stop live' : 'Live';
+  $('#focus-record-btn').textContent = cam.recording_active ? 'Stop rekam' : 'Rekam';
+  $('#focus-motion-btn').textContent = cam.motion_detection_enabled ? 'Matikan Motion' : 'Hidupkan Motion';
+  $('#focus-motion-btn').style.display = state.user.role === 'viewer' ? 'none' : '';
+  $('#focus-ptz').classList.toggle('hidden', !cam.ptz_supported);
+
+  const video = $('#focus-video');
+  const placeholder = $('#focus-placeholder');
+  if (cam.stream.active) {
+    placeholder.classList.add('hidden');
+    if (!focusHls && !video.currentSrc) {
+      if (Hls.isSupported()) {
+        focusHls = new Hls();
+        focusHls.loadSource(`/streams/${cam.id}/index.m3u8`);
+        focusHls.attachMedia(video);
+        focusHls.on(Hls.Events.ERROR, (_evt, data) => {
+          if (!data.fatal) return;
+          focusHls?.destroy();
+          focusHls = null;
+          if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
+          placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
+          placeholder.classList.remove('hidden');
+          setTimeout(() => {
+            if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
+            const latestCam = state.cameras.find((c) => c.id === cam.id);
+            if (latestCam) renderFocusModal(latestCam);
+          }, 3000);
+        });
+        video.play().catch(() => {});
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = `/streams/${cam.id}/index.m3u8`;
+        video.play().catch(() => {});
+      }
+    }
+  } else {
+    if (focusHls) {
+      focusHls.destroy();
+      focusHls = null;
+    }
+    video.removeAttribute('src');
+    video.load();
+    placeholder.classList.remove('hidden');
+    placeholder.textContent = cam.stream.reconnecting
+      ? 'Menyambung ulang...'
+      : (cam.rtsp_url ? 'Klik "Live" untuk mulai menonton' : 'RTSP belum diatur — lakukan ONVIF probe');
+  }
+}
+
+async function handleFocusAction(action) {
+  const cam = state.cameras.find((c) => c.id === focusCameraId);
+  if (!cam) return;
+  try {
+    if (action === 'stream') {
+      await api(`/cameras/${cam.id}/stream/${cam.stream.active ? 'stop' : 'start'}`, { method: 'POST' });
+    } else if (action === 'record') {
+      await api(`/cameras/${cam.id}/recording/${cam.recording_active ? 'stop' : 'start'}`, { method: 'POST' });
+    } else if (action === 'probe') {
+      $('#focus-placeholder').classList.remove('hidden');
+      $('#focus-placeholder').textContent = 'Menghubungi kamera via ONVIF...';
+      await api(`/cameras/${cam.id}/onvif/probe`, { method: 'POST' });
+    } else if (action === 'motion') {
+      await api(`/cameras/${cam.id}`, {
+        method: 'PUT',
+        body: {
+          motion_detection_enabled: !cam.motion_detection_enabled,
+          motion_sensitivity: cam.motion_sensitivity || 0.04,
+          motion_recording_enabled: cam.motion_recording_enabled,
+        },
+      });
+    }
+    await loadCameras();
+    const updatedCam = state.cameras.find((c) => c.id === focusCameraId);
+    if (updatedCam && !$('#focus-modal').classList.contains('hidden')) renderFocusModal(updatedCam);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+$('#focus-close-btn')?.addEventListener('click', closeFocusView);
+$('#focus-modal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'focus-modal') closeFocusView();
+});
+$('#focus-stream-btn')?.addEventListener('click', () => handleFocusAction('stream'));
+$('#focus-record-btn')?.addEventListener('click', () => handleFocusAction('record'));
+$('#focus-probe-btn')?.addEventListener('click', () => handleFocusAction('probe'));
+$('#focus-motion-btn')?.addEventListener('click', () => handleFocusAction('motion'));
+$('#focus-ptz')?.querySelectorAll('[data-focus-ptz]').forEach((btn) => {
+  const move = () => focusCameraId && sendPtz(focusCameraId, btn.dataset.focusPtz);
+  btn.addEventListener('mousedown', move);
+  btn.addEventListener('mouseup', () => focusCameraId && sendPtz(focusCameraId, 'stop'));
+  btn.addEventListener('mouseleave', () => focusCameraId && sendPtz(focusCameraId, 'stop'));
+});
+
+// ---- Start all / stop all live streams ----
+
+$('#stream-start-all-btn')?.addEventListener('click', async () => {
+  const btn = $('#stream-start-all-btn');
+  const targets = state.cameras.filter((c) => c.rtsp_url && !c.stream.active);
+  if (targets.length === 0) return;
+  btn.disabled = true;
+  try {
+    for (const cam of targets) {
+      try {
+        await api(`/cameras/${cam.id}/stream/start`, { method: 'POST' });
+      } catch (e) {
+        console.error(`Gagal menyalakan live "${cam.name}":`, e.message);
+      }
+    }
+    await loadCameras();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#stream-stop-all-btn')?.addEventListener('click', async () => {
+  const btn = $('#stream-stop-all-btn');
+  const targets = state.cameras.filter((c) => c.stream.active);
+  if (targets.length === 0) return;
+  btn.disabled = true;
+  try {
+    for (const cam of targets) {
+      try {
+        await api(`/cameras/${cam.id}/stream/stop`, { method: 'POST' });
+        stopPlayer(cam.id);
+      } catch (e) {
+        console.error(`Gagal menghentikan live "${cam.name}":`, e.message);
+      }
+    }
+    await loadCameras();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---- Add/Edit camera modal ----
+
+let editingCameraId = null;
+let editingCameraWasRelay = false;
+
+function resetCameraModal() {
+  $('#cam-is-relay').checked = false;
+  $('#cam-relay-token-box').classList.add('hidden');
+  $('#cam-relay-token-value').textContent = '';
+  $('#cam-building').value = '';
+}
+
+function openCameraModal(cam) {
+  resetCameraModal();
+  editingCameraId = cam ? cam.id : null;
+  editingCameraWasRelay = !!cam?.is_relay;
+  $('#camera-modal-title').textContent = cam ? `Edit kamera: ${cam.name}` : 'Tambah kamera';
+  $('#cam-save-btn').textContent = cam ? 'Simpan perubahan' : 'Simpan kamera';
+  $('#cam-name').value = cam?.name || '';
+  $('#cam-brand').value = cam?.brand || '';
+  $('#cam-ip').value = cam?.ip || '';
+  $('#cam-onvif-port').value = cam?.onvif_port || 80;
+  $('#cam-rtsp-port').value = cam?.rtsp_port || 554;
+  $('#cam-username').value = cam?.username || '';
+  $('#cam-password').value = '';
+  $('#cam-password').placeholder = cam ? 'Kosongkan kalau tidak diubah' : '';
+  $('#cam-rtsp-path').value = cam?.rtsp_path || '';
+  $('#cam-motion-enabled').checked = !!cam?.motion_detection_enabled;
+  $('#cam-motion-recording').checked = !!cam?.motion_recording_enabled;
+  $('#cam-motion-sensitivity').value = cam?.motion_sensitivity || 0.04;
+  $('#cam-location').value = cam?.location_id || '';
+  $('#cam-building').value = cam?.building || '';
+  $('#cam-is-relay').checked = !!cam?.is_relay;
+  $('#cam-form-msg').textContent = '';
+  $('#cam-form-msg').className = 'form-msg';
+  $('#camera-modal').classList.remove('hidden');
+}
+
+function buildRelayAgentCommand(token) {
+  const ip = $('#cam-ip').value.trim();
+  const port = $('#cam-rtsp-port').value || 554;
+  const user = $('#cam-username').value.trim();
+  const pass = $('#cam-password').value;
+  const path = $('#cam-rtsp-path').value.trim() || '/Streaming/Channels/101';
+  const auth = user ? `${encodeURIComponent(user)}:${encodeURIComponent(pass || '')}@` : '';
+  const rtspUrl = `rtsp://${auth}${ip}:${port}${path}`;
+  return `node relay-agent.js --server=${window.location.origin} --token=${token} --rtsp="${rtspUrl}"`;
+}
+
+$('#add-camera-btn').addEventListener('click', () => openCameraModal(null));
+$('#cam-cancel-btn').addEventListener('click', () => $('#camera-modal').classList.add('hidden'));
+
+$('#cam-relay-copy-btn')?.addEventListener('click', () => {
+  navigator.clipboard?.writeText($('#cam-relay-token-value').textContent);
+  const btn = $('#cam-relay-copy-btn');
+  const original = btn.textContent;
+  btn.textContent = 'Tersalin!';
+  setTimeout(() => { btn.textContent = original; }, 1500);
+});
+
+$('#cam-save-btn').addEventListener('click', async () => {
+  const msg = $('#cam-form-msg');
+  msg.className = 'form-msg';
+  msg.textContent = '';
+  try {
+    const isEdit = editingCameraId !== null;
+    const isRelay = $('#cam-is-relay').checked;
+    const body = {
+      name: $('#cam-name').value.trim(),
+      brand: $('#cam-brand').value.trim(),
+      ip: $('#cam-ip').value.trim(),
+      onvif_port: Number($('#cam-onvif-port').value) || 80,
+      rtsp_port: Number($('#cam-rtsp-port').value) || 554,
+      username: $('#cam-username').value.trim(),
+      rtsp_path: $('#cam-rtsp-path').value.trim(),
+      motion_detection_enabled: $('#cam-motion-enabled').checked,
+      motion_sensitivity: Number($('#cam-motion-sensitivity').value) || 0.04,
+      motion_recording_enabled: $('#cam-motion-recording').checked,
+      location_id: $('#cam-location').value ? Number($('#cam-location').value) : null,
+      building: $('#cam-building').value.trim(),
+      is_relay: isRelay,
+    };
+    // Blank password while editing means "leave it as-is" (we never show
+    // the real one back in the form); adding a camera always sends it,
+    // even empty, same as before.
+    const passwordInput = $('#cam-password').value;
+    if (!isEdit || passwordInput) body.password = passwordInput;
+    if (!body.name || !body.ip) throw new Error('Nama dan alamat IP wajib diisi');
+
+    const result = isEdit
+      ? await api(`/cameras/${editingCameraId}`, { method: 'PUT', body })
+      : await api('/cameras', { method: 'POST', body });
+    msg.textContent = 'Kamera tersimpan';
+    msg.classList.add('ok');
+
+    // Only pop up the ready-to-run agent command when relay mode was just
+    // turned on — re-showing it on every unrelated edit would be noise
+    // ("Info Agen" on the tile covers viewing it again later).
+    const justBecameRelay = isRelay && result.relay_token && (!isEdit || !editingCameraWasRelay);
+    if (justBecameRelay) {
+      await loadCameras();
+      // Build the command from the saved camera's real rtsp_url (not the
+      // form fields) — if editing and the password was left blank to keep
+      // the existing one, the form field itself would be empty and produce
+      // a command with a blank password.
+      const savedCam = state.cameras.find((c) => c.id === (editingCameraId || result.id));
+      $('#cam-relay-token-value').textContent = savedCam?.rtsp_url
+        ? `node relay-agent.js --server=${window.location.origin} --token=${result.relay_token} --rtsp="${savedCam.rtsp_url}"`
+        : buildRelayAgentCommand(result.relay_token);
+      $('#cam-relay-token-box').classList.remove('hidden');
+      // Leave the modal open so the user can copy the agent command; they
+      // close it manually via "Batal" once done.
+      return;
+    }
+
+    setTimeout(() => {
+      $('#camera-modal').classList.add('hidden');
+      ['cam-name', 'cam-brand', 'cam-ip', 'cam-username', 'cam-password', 'cam-rtsp-path', 'cam-motion-sensitivity', 'cam-building'].forEach((id) => ($(`#${id}`).value = ''));
+      $('#cam-motion-enabled').checked = false;
+      $('#cam-motion-recording').checked = false;
+      $('#cam-location').value = '';
+      editingCameraId = null;
+      resetCameraModal();
+      loadCameras();
+    }, 600);
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('error');
+  }
+});
+
+// ---- Import cameras from CSV ----
+
+function parseCsv(text) {
+  const rows = [];
+  let field = '';
+  let row = [];
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else {
+        field += c;
+      }
+      continue;
+    }
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ',') { row.push(field); field = ''; continue; }
+    if (c === '\r') continue;
+    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; continue; }
+    field += c;
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  if (rows.length === 0) return [];
+
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  return rows.slice(1)
+    .filter((r) => r.some((v) => v.trim() !== ''))
+    .map((r) => {
+      const obj = {};
+      header.forEach((h, idx) => { obj[h] = (r[idx] || '').trim(); });
+      return obj;
+    });
+}
+
+let importRows = [];
+
+$('#import-csv-btn')?.addEventListener('click', () => {
+  importRows = [];
+  $('#import-file-input').value = '';
+  $('#import-file-input').disabled = false;
+  $('#import-preview').classList.add('hidden');
+  $('#import-results').classList.add('hidden');
+  $('#import-form-msg').textContent = '';
+  $('#import-form-msg').className = 'form-msg';
+  $('#import-start-btn').disabled = true;
+  $('#import-modal').classList.remove('hidden');
+});
+
+$('#import-cancel-btn')?.addEventListener('click', () => $('#import-modal').classList.add('hidden'));
+
+$('#import-template-link')?.addEventListener('click', (e) => {
+  e.preventDefault();
+  const csv = 'name,brand,ip,rtsp_port,onvif_port,username,password,rtsp_path,location\n'
+    + 'Kamera Depan,Hikvision,192.168.1.101,554,80,admin,password123,/Streaming/Channels/101,Lokasi 1\n'
+    + 'Kamera Belakang,Dahua,192.168.1.102,554,80,admin,password123,,Lokasi 1\n';
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'contoh-import-kamera.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+$('#import-file-input')?.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  const startBtn = $('#import-start-btn');
+  const preview = $('#import-preview');
+  const msg = $('#import-form-msg');
+  msg.textContent = '';
+  msg.className = 'form-msg';
+  $('#import-results').classList.add('hidden');
+
+  if (!file) {
+    importRows = [];
+    startBtn.disabled = true;
+    preview.classList.add('hidden');
+    return;
+  }
+
+  try {
+    const text = await file.text();
+    const rows = parseCsv(text);
+    const valid = rows.filter((r) => r.name && r.ip);
+    const invalidCount = rows.length - valid.length;
+    importRows = valid;
+
+    if (importRows.length === 0) {
+      preview.classList.add('hidden');
+      startBtn.disabled = true;
+      msg.textContent = 'Tidak ada baris valid (name & ip wajib diisi) di file ini';
+      msg.classList.add('error');
+      return;
+    }
+
+    const previewRows = importRows.slice(0, 8);
+    preview.innerHTML = `
+      <table>
+        <thead><tr><th>Name</th><th>IP</th><th>Brand</th><th>Location</th></tr></thead>
+        <tbody>
+          ${previewRows.map((r) => `<tr><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.ip)}</td><td>${escapeHtml(r.brand || '-')}</td><td>${escapeHtml(r.location || '-')}</td></tr>`).join('')}
+        </tbody>
+      </table>
+      ${importRows.length > previewRows.length ? `<div style="margin-top:8px;color:var(--text-faint)">...dan ${importRows.length - previewRows.length} baris lainnya</div>` : ''}
+    `;
+    preview.classList.remove('hidden');
+    startBtn.disabled = false;
+    msg.textContent = `${importRows.length} baris siap diimpor${invalidCount ? ` (${invalidCount} baris dilewati karena name/ip kosong)` : ''}`;
+    msg.classList.add('ok');
+  } catch (err) {
+    msg.textContent = `Gagal membaca file: ${err.message}`;
+    msg.classList.add('error');
+    startBtn.disabled = true;
+  }
+});
+
+$('#import-start-btn')?.addEventListener('click', async () => {
+  const startBtn = $('#import-start-btn');
+  const resultsEl = $('#import-results');
+  const msg = $('#import-form-msg');
+  startBtn.disabled = true;
+  $('#import-file-input').disabled = true;
+  resultsEl.classList.remove('hidden');
+  msg.textContent = '';
+  msg.className = 'form-msg';
+
+  let ok = 0;
+  const failures = [];
+  resultsEl.innerHTML = `<div class="import-progress-bar"><div class="import-progress-fill" id="import-progress-fill" style="width:0%"></div></div><div id="import-progress-label">Mengimpor 0/${importRows.length}...</div>`;
+
+  for (let i = 0; i < importRows.length; i++) {
+    const row = importRows[i];
+    const loc = row.location ? state.locations.find((l) => l.name.toLowerCase() === row.location.toLowerCase()) : null;
+    const body = {
+      name: row.name,
+      brand: row.brand || '',
+      ip: row.ip,
+      onvif_port: Number(row.onvif_port) || 80,
+      rtsp_port: Number(row.rtsp_port) || 554,
+      username: row.username || '',
+      password: row.password || '',
+      rtsp_path: row.rtsp_path || '',
+      location_id: loc ? loc.id : null,
+    };
+    try {
+      await api('/cameras', { method: 'POST', body });
+      ok++;
+    } catch (err) {
+      failures.push({ row: i + 2, name: row.name, error: err.message });
+    }
+    const pct = Math.round(((i + 1) / importRows.length) * 100);
+    $('#import-progress-fill').style.width = `${pct}%`;
+    $('#import-progress-label').textContent = `Mengimpor ${i + 1}/${importRows.length}...`;
+  }
+
+  resultsEl.innerHTML = `
+    <div class="import-summary">
+      <span class="ok-count">${ok} berhasil</span>
+      ${failures.length ? `<span class="fail-count">${failures.length} gagal</span>` : ''}
+    </div>
+    ${failures.length ? `
+      <table>
+        <thead><tr><th>Baris</th><th>Nama</th><th>Error</th></tr></thead>
+        <tbody>${failures.map((f) => `<tr class="import-row-error"><td>${f.row}</td><td>${escapeHtml(f.name)}</td><td>${escapeHtml(f.error)}</td></tr>`).join('')}</tbody>
+      </table>
+    ` : ''}
+  `;
+
+  $('#import-file-input').disabled = false;
+  await loadCameras();
+  await loadLocations();
+});
+
+// ---- Locations & map ----
+
+let leafletMap = null;
+let mapMarkers = new Map(); // locationId -> marker
+let editingLocationId = null;
+
+const naturalSort = new Intl.Collator('id', { numeric: true, sensitivity: 'base' });
+function sortLocationsNaturally(locations) {
+  return [...locations].sort((a, b) => naturalSort.compare(a.name, b.name));
+}
+
+async function loadLocations() {
+  try {
+    state.locations = sortLocationsNaturally(await api('/locations'));
+    renderLocationDropdown();
+    renderLocationTree();
+    renderLocationsTable();
+    if (leafletMap) renderMapMarkers();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderLocationsTable() {
+  const tbody = $('#locations-table');
+  if (!tbody) return;
+  const canEdit = state.user.role !== 'viewer';
+
+  tbody.innerHTML = state.locations.map((loc) => `
+    <tr>
+      <td>${canEdit
+        ? `<span class="location-name-inline" data-id="${loc.id}" title="Klik untuk ganti nama">${escapeHtml(loc.name)}</span>`
+        : escapeHtml(loc.name)}</td>
+      <td>${escapeHtml(loc.address || '-')}</td>
+      <td>${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}</td>
+      <td>${loc.camera_count ?? 0}</td>
+      <td class="row-actions">
+        <button data-loc-action="view" data-id="${loc.id}">Lihat kamera</button>
+        ${canEdit ? `<button data-loc-action="edit" data-id="${loc.id}">Edit</button>` : ''}
+        ${state.user.role === 'admin' ? `<button class="danger" data-loc-action="delete" data-id="${loc.id}">Hapus</button>` : ''}
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="5" style="color:var(--text-dim)">Belum ada lokasi</td></tr>';
+
+  tbody.querySelectorAll('[data-loc-action]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const loc = state.locations.find((l) => l.id === Number(btn.dataset.id));
+      if (!loc) return;
+      const action = btn.dataset.locAction;
+      if (action === 'view') goToLocationCameras(loc.id);
+      else if (action === 'edit') openLocationModal(loc);
+      else if (action === 'delete') deleteLocation(loc);
+    });
+  });
+
+  tbody.querySelectorAll('.location-name-inline').forEach((span) => {
+    span.addEventListener('click', () => startInlineLocationRename(span));
+  });
+}
+
+function startInlineLocationRename(span) {
+  const locId = Number(span.dataset.id);
+  const loc = state.locations.find((l) => l.id === locId);
+  if (!loc) return;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = loc.name;
+  input.className = 'location-name-edit-input';
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+
+  const commit = async () => {
+    if (settled) return;
+    settled = true;
+    const newName = input.value.trim();
+    if (!newName || newName === loc.name) {
+      renderLocationsTable();
+      return;
+    }
+    try {
+      await api(`/locations/${locId}`, { method: 'PUT', body: { name: newName } });
+      await loadLocations();
+    } catch (e) {
+      alert(e.message);
+      renderLocationsTable();
+    }
+  };
+
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    renderLocationsTable();
+  };
+
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      input.blur();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    }
+  });
+}
+
+function renderLocationDropdown() {
+  const select = $('#cam-location');
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = '<option value="">Tidak ditentukan</option>' +
+    state.locations.map((l) => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
+  select.value = current;
+}
+
+function renderLeaf(cam) {
+  return `
+    <div class="tree-leaf" data-tree-cam="${cam.id}">
+      <span class="tree-cam-dot ${cam.stream?.active ? 'live' : ''}"></span>${escapeHtml(cam.name)}
+    </div>
+  `;
+}
+
+function renderLocationTree() {
+  const wrap = $('#location-tree');
+  if (!wrap) return;
+
+  const rows = [`
+    <div class="tree-row tree-root ${!state.locationFilter ? 'active' : ''}" data-tree-loc="">
+      <span class="tree-toggle-spacer"></span>
+      <span class="tree-icon">🗂️</span>
+      <span class="tree-label">Semua Kamera</span>
+      <span class="tree-count">${state.cameras.length}</span>
+    </div>
+  `];
+
+  for (const loc of state.locations) {
+    const camsInLoc = state.cameras.filter((c) => c.location_id === loc.id);
+    const locKey = `loc-${loc.id}`;
+    const expanded = state.treeExpanded.has(locKey);
+    const locActive = state.locationFilter === loc.id && !state.buildingFilter;
+
+    // Cameras with a "Gedung" set branch into their own sub-folder; cameras
+    // without one stay as direct leaves under the location, same as before.
+    const buildingNames = [...new Set(camsInLoc.filter((c) => c.building).map((c) => c.building))].sort();
+    const noBuilding = camsInLoc.filter((c) => !c.building);
+
+    rows.push(`
+      <div class="tree-row ${locActive ? 'active' : ''}" data-tree-loc="${loc.id}">
+        <button class="tree-toggle" data-tree-toggle="${locKey}" title="${expanded ? 'Lipat' : 'Buka'}">${expanded ? '▾' : '▸'}</button>
+        <span class="tree-icon">📁</span>
+        <span class="tree-label">${escapeHtml(loc.name)}</span>
+        <span class="tree-count">${camsInLoc.length}</span>
+      </div>
+      <div class="tree-children ${expanded ? '' : 'hidden'}">
+        ${buildingNames.map((bldg) => {
+          const bldgKey = `bldg-${loc.id}-${bldg}`;
+          const bldgExpanded = state.treeExpanded.has(bldgKey);
+          const bldgCams = camsInLoc.filter((c) => c.building === bldg);
+          const bldgActive = state.buildingFilter && state.buildingFilter.locationId === loc.id && state.buildingFilter.building === bldg;
+          return `
+            <div class="tree-row tree-row-bldg ${bldgActive ? 'active' : ''}" data-tree-bldg-loc="${loc.id}" data-tree-bldg-name="${escapeHtml(bldg)}">
+              <button class="tree-toggle" data-tree-toggle="${bldgKey}" title="${bldgExpanded ? 'Lipat' : 'Buka'}">${bldgExpanded ? '▾' : '▸'}</button>
+              <span class="tree-icon">🏢</span>
+              <span class="tree-label">${escapeHtml(bldg)}</span>
+              <span class="tree-count">${bldgCams.length}</span>
+            </div>
+            <div class="tree-children tree-children-2 ${bldgExpanded ? '' : 'hidden'}">
+              ${bldgCams.map(renderLeaf).join('')}
+            </div>
+          `;
+        }).join('')}
+        ${noBuilding.map(renderLeaf).join('')}
+        ${camsInLoc.length === 0 ? '<div class="tree-empty">Tidak ada kamera</div>' : ''}
+      </div>
+    `);
+  }
+
+  wrap.innerHTML = rows.join('');
+
+  wrap.querySelectorAll('[data-tree-toggle]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const key = btn.dataset.treeToggle;
+      if (state.treeExpanded.has(key)) state.treeExpanded.delete(key);
+      else state.treeExpanded.add(key);
+      renderLocationTree();
+    });
+  });
+  wrap.querySelectorAll('[data-tree-loc]').forEach((row) => {
+    row.addEventListener('click', () => {
+      state.locationFilter = row.dataset.treeLoc ? Number(row.dataset.treeLoc) : null;
+      state.buildingFilter = null;
+      state.layoutPage = 0;
+      renderLocationTree();
+      renderGrid();
+    });
+  });
+  wrap.querySelectorAll('[data-tree-bldg-loc]').forEach((row) => {
+    row.addEventListener('click', () => {
+      const locationId = Number(row.dataset.treeBldgLoc);
+      state.locationFilter = locationId;
+      state.buildingFilter = { locationId, building: row.dataset.treeBldgName };
+      state.layoutPage = 0;
+      renderLocationTree();
+      renderGrid();
+    });
+  });
+  wrap.querySelectorAll('[data-tree-cam]').forEach((leaf) => {
+    leaf.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const cam = state.cameras.find((c) => c.id === Number(leaf.dataset.treeCam));
+      if (!cam) return;
+      state.locationFilter = cam.location_id;
+      state.buildingFilter = cam.building ? { locationId: cam.location_id, building: cam.building } : null;
+      renderLocationTree();
+      renderGrid();
+      openFocusView(cam.id);
+    });
+  });
+}
+
+const CAPABILITY_PREDICATES = {
+  ptz: (c) => !!c.ptz_supported,
+  motion: (c) => !!c.motion_detection_enabled,
+  recording: (c) => !!c.recording_enabled,
+  relay: (c) => !!c.is_relay,
+};
+
+function renderStatusFilters() {
+  const select = $('#status-filter-select');
+  if (select) {
+    const activeCount = state.cameras.filter((c) => c.stream?.active).length;
+    const inactiveCount = state.cameras.length - activeCount;
+    select.options[0].textContent = `Semua Status (${state.cameras.length})`;
+    select.options[1].textContent = `Aktif (${activeCount})`;
+    select.options[2].textContent = `Tidak Aktif (${inactiveCount})`;
+    select.value = state.statusFilter || '';
+  }
+
+  const capSelect = $('#capability-filter-select');
+  if (capSelect) {
+    const labels = {
+      ptz: 'Mendukung PTZ',
+      motion: 'Motion Detection Aktif',
+      recording: 'Rekaman Berkelanjutan Aktif',
+      relay: 'Kamera Relay',
+    };
+    capSelect.options[0].textContent = `Semua Fungsi (${state.cameras.length})`;
+    Array.from(capSelect.options).slice(1).forEach((opt) => {
+      const count = state.cameras.filter(CAPABILITY_PREDICATES[opt.value]).length;
+      opt.textContent = `${labels[opt.value]} (${count})`;
+    });
+    capSelect.value = state.capabilityFilter || '';
+  }
+}
+
+$('#status-filter-select')?.addEventListener('change', (e) => {
+  state.statusFilter = e.target.value || null;
+  state.layoutPage = 0;
+  renderGrid();
+});
+
+$('#capability-filter-select')?.addEventListener('change', (e) => {
+  state.capabilityFilter = e.target.value || null;
+  state.layoutPage = 0;
+  renderGrid();
+});
+
+function getVisibleCameras() {
+  let list = state.cameras;
+  if (state.locationFilter) {
+    list = list.filter((c) => c.location_id === state.locationFilter);
+  }
+  if (state.buildingFilter) {
+    list = list.filter((c) => c.location_id === state.buildingFilter.locationId && c.building === state.buildingFilter.building);
+  }
+  if (state.statusFilter === 'active') {
+    list = list.filter((c) => c.stream?.active);
+  } else if (state.statusFilter === 'inactive') {
+    list = list.filter((c) => !c.stream?.active);
+  }
+  if (state.capabilityFilter && CAPABILITY_PREDICATES[state.capabilityFilter]) {
+    list = list.filter(CAPABILITY_PREDICATES[state.capabilityFilter]);
+  }
+  const q = state.cameraSearch.trim().toLowerCase();
+  if (q) {
+    list = list.filter((c) => {
+      const loc = state.locations.find((l) => l.id === c.location_id);
+      const haystack = [c.name, c.ip, c.brand, loc?.name].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(q);
+    });
+  }
+  return list;
+}
+
+$('#camera-search-input')?.addEventListener('input', (e) => {
+  state.cameraSearch = e.target.value;
+  state.layoutPage = 0;
+  $('#camera-search-clear')?.classList.toggle('hidden', !state.cameraSearch);
+  renderGrid();
+});
+
+$('#camera-search-clear')?.addEventListener('click', () => {
+  state.cameraSearch = '';
+  $('#camera-search-input').value = '';
+  $('#camera-search-clear').classList.add('hidden');
+  state.layoutPage = 0;
+  renderGrid();
+});
+
+let mapSubTab = 'list';
+
+function showMapView() {
+  // Default to the "Daftar Lokasi" tab — the map (and its tile requests)
+  // only initializes lazily once the user actually clicks the "Peta" tab.
+  switchMapSubTab(mapSubTab);
+}
+
+function switchMapSubTab(tab) {
+  mapSubTab = tab;
+  document.querySelectorAll('#map-sub-tabs .sub-tab').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.subtab === tab);
+  });
+  $('#map-subview-list')?.classList.toggle('hidden', tab !== 'list');
+  $('#map-subview-map')?.classList.toggle('hidden', tab !== 'map');
+
+  if (tab === 'list') {
+    renderLocationsTable();
+  } else {
+    initMapIfNeeded();
+    // Leaflet computes tile layout from its container's size — while the
+    // map div sits under a hidden tab its size is 0, so the view must be
+    // refreshed once it's actually visible or tiles render misaligned/blank.
+    setTimeout(() => leafletMap?.invalidateSize(), 50);
+    renderMapMarkers();
+  }
+}
+
+document.querySelectorAll('#map-sub-tabs .sub-tab').forEach((btn) => {
+  btn.addEventListener('click', () => switchMapSubTab(btn.dataset.subtab));
+});
+
+function initMapIfNeeded() {
+  if (!leafletMap && typeof L !== 'undefined') {
+    leafletMap = L.map('location-map').setView([-2.5, 118], 5);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+      maxZoom: 19,
+      subdomains: 'abcd',
+    }).addTo(leafletMap);
+    leafletMap.on('click', (e) => openLocationModal(null, e.latlng));
+  }
+}
+
+function renderMapMarkers() {
+  if (!leafletMap) return;
+  for (const marker of mapMarkers.values()) leafletMap.removeLayer(marker);
+  mapMarkers.clear();
+
+  const canEdit = state.user.role !== 'viewer';
+  const bounds = [];
+  for (const loc of state.locations) {
+    const camCount = state.cameras.filter((c) => c.location_id === loc.id).length;
+    const marker = L.marker([loc.lat, loc.lng], { draggable: canEdit }).addTo(leafletMap);
+    if (canEdit) {
+      marker.on('dragend', async () => {
+        const { lat, lng } = marker.getLatLng();
+        const prevLat = loc.lat;
+        const prevLng = loc.lng;
+        try {
+          await api(`/locations/${loc.id}`, { method: 'PUT', body: { lat, lng } });
+          loc.lat = lat;
+          loc.lng = lng;
+          const confirmPopup = L.popup({ closeButton: false, autoClose: true })
+            .setLatLng([lat, lng])
+            .setContent('<div style="font-size:12px;font-weight:600;">✓ Posisi lokasi tersimpan</div>')
+            .openOn(leafletMap);
+          setTimeout(() => leafletMap.closePopup(confirmPopup), 1400);
+        } catch (err) {
+          marker.setLatLng([prevLat, prevLng]);
+          alert(`Gagal menyimpan posisi baru: ${err.message}`);
+        }
+      });
+    }
+    const popupEl = document.createElement('div');
+    popupEl.innerHTML = `
+      <div class="map-popup-title">${escapeHtml(loc.name)}</div>
+      ${loc.address ? `<div class="map-popup-address">${escapeHtml(loc.address)}</div>` : ''}
+      <div class="map-popup-count">${camCount} kamera terdaftar</div>
+      <div class="map-popup-actions">
+        <button class="primary" data-map-action="view">Lihat kamera</button>
+        <button data-map-action="edit">Edit</button>
+        ${state.user.role === 'admin' ? `<button class="danger" data-map-action="delete">Hapus</button>` : ''}
+      </div>
+    `;
+    popupEl.querySelector('[data-map-action="view"]').addEventListener('click', () => goToLocationCameras(loc.id));
+    popupEl.querySelector('[data-map-action="edit"]').addEventListener('click', () => openLocationModal(loc));
+    popupEl.querySelector('[data-map-action="delete"]')?.addEventListener('click', () => deleteLocation(loc));
+    marker.bindPopup(popupEl);
+    mapMarkers.set(loc.id, marker);
+    bounds.push([loc.lat, loc.lng]);
+  }
+  if (bounds.length > 0) {
+    leafletMap.fitBounds(bounds, { padding: [40, 40], maxZoom: 12 });
+  }
+}
+
+function goToLocationCameras(locationId) {
+  state.locationFilter = locationId;
+  state.layoutPage = 0;
+  state.treeExpanded.add(locationId);
+  document.querySelector('.nav-item[data-view="live"]')?.click();
+  renderLocationTree();
+  renderGrid();
+}
+
+function openLocationModal(loc, latlng) {
+  editingLocationId = loc ? loc.id : null;
+  $('#location-modal-title').textContent = loc ? `Edit lokasi: ${loc.name}` : 'Tambah lokasi';
+  $('#loc-name').value = loc ? loc.name : '';
+  $('#loc-address').value = loc ? (loc.address || '') : '';
+  $('#loc-lat').value = loc ? loc.lat : (latlng ? latlng.lat.toFixed(6) : '');
+  $('#loc-lng').value = loc ? loc.lng : (latlng ? latlng.lng.toFixed(6) : '');
+  $('#location-form-msg').textContent = '';
+  $('#location-form-msg').className = 'form-msg';
+  $('#location-modal').classList.remove('hidden');
+}
+
+function closeLocationModal() {
+  $('#location-modal').classList.add('hidden');
+  editingLocationId = null;
+}
+
+let locationModalSource = null;
+
+$('#add-location-btn')?.addEventListener('click', () => {
+  locationModalSource = null;
+  openLocationModal(null);
+});
+$('#cam-add-location-btn')?.addEventListener('click', () => {
+  // No map click context here, so seed a default point (Indonesia-ish
+  // center) — the user can drag the pin to the right spot later from
+  // Peta Lokasi. What matters right now is not blocking the camera form.
+  locationModalSource = 'camera-form';
+  openLocationModal(null, { lat: -2.5, lng: 118 });
+});
+$('#location-cancel-btn')?.addEventListener('click', () => {
+  locationModalSource = null;
+  closeLocationModal();
+});
+
+$('#location-save-btn')?.addEventListener('click', async () => {
+  const msg = $('#location-form-msg');
+  msg.className = 'form-msg';
+  msg.textContent = '';
+  try {
+    const body = {
+      name: $('#loc-name').value.trim(),
+      address: $('#loc-address').value.trim(),
+      lat: $('#loc-lat').value,
+      lng: $('#loc-lng').value,
+    };
+    if (!body.name || body.lat === '' || body.lng === '') throw new Error('Nama, latitude, dan longitude wajib diisi');
+
+    let savedId = editingLocationId;
+    if (editingLocationId) {
+      await api(`/locations/${editingLocationId}`, { method: 'PUT', body });
+    } else {
+      const created = await api('/locations', { method: 'POST', body });
+      savedId = created.id;
+    }
+    msg.textContent = 'Lokasi tersimpan';
+    msg.classList.add('ok');
+    const cameFromCameraForm = locationModalSource === 'camera-form';
+    setTimeout(async () => {
+      closeLocationModal();
+      await loadLocations();
+      if (cameFromCameraForm && savedId) $('#cam-location').value = savedId;
+      locationModalSource = null;
+    }, 500);
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('error');
+  }
+});
+
+async function deleteLocation(loc) {
+  if (!confirm(`Hapus lokasi "${loc.name}"? Kamera yang terhubung tidak akan terhapus, hanya lepas dari lokasi ini.`)) return;
+  try {
+    await api(`/locations/${loc.id}`, { method: 'DELETE' });
+    await loadLocations();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function loadRecordings() {
+  try {
+    const rows = await api('/recordings');
+    const tbody = $('#recordings-table');
+    if (!tbody) return;
+    tbody.innerHTML = rows.map((r) => {
+      const cam = state.cameras.find((c) => c.id === r.camera_id);
+      const camLabel = cam ? cam.name : `Kamera #${r.camera_id}`;
+      return `
+        <tr>
+          <td>${escapeHtml(camLabel)}</td>
+          <td>${escapeHtml(r.filename)}</td>
+          <td>${new Date(r.started_at).toLocaleString('id-ID')}</td>
+          <td>${formatBytes(r.size_bytes)}</td>
+          <td class="row-actions">
+            <button data-recording-action="play" data-id="${r.id}" data-filename="${escapeHtml(r.filename)}" data-camera="${escapeHtml(camLabel)}">Putar</button>
+            <button data-recording-action="download" data-id="${r.id}" data-filename="${escapeHtml(r.filename)}">Unduh</button>
+          </td>
+        </tr>
+      `;
+    }).join('') || '<tr><td colspan="5" style="color:var(--text-dim)">Belum ada rekaman</td></tr>';
+
+    tbody.querySelectorAll('[data-recording-action="download"]').forEach((btn) => {
+      btn.addEventListener('click', () => downloadRecording(Number(btn.dataset.id), btn.dataset.filename));
+    });
+    tbody.querySelectorAll('[data-recording-action="play"]').forEach((btn) => {
+      btn.addEventListener('click', () => openPlayer(Number(btn.dataset.id), btn.dataset.filename, btn.dataset.camera));
+    });
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+async function downloadRecording(id, filename) {
+  try {
+    const res = await fetch(`/api/recordings/${id}/download`, {
+      headers: state.token ? { Authorization: `Bearer ${state.token}` } : {},
+    });
+    if (!res.ok) throw new Error('Gagal mengunduh rekaman');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'recording.mp4';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+function openPlayer(id, filename, cameraLabel) {
+  const video = $('#player-video');
+  $('#player-title').textContent = filename;
+  $('#player-subtitle').textContent = cameraLabel || '';
+  video.src = `/api/recordings/${id}/stream?token=${encodeURIComponent(state.token)}`;
+  $('#player-download-link').href = `/api/recordings/${id}/download?token=${encodeURIComponent(state.token)}`;
+  $('#player-download-link').setAttribute('download', filename || 'recording.mp4');
+  $('#player-modal').classList.remove('hidden');
+  video.play().catch(() => {});
+}
+
+function closePlayer() {
+  const video = $('#player-video');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  $('#player-modal').classList.add('hidden');
+}
+
+$('#player-close-btn')?.addEventListener('click', closePlayer);
+$('#player-modal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'player-modal') closePlayer();
+});
+
+// ---- Dashboard ----
+
+async function loadDashboard() {
+  try {
+    const [cameras, rawLocations, events, recStats] = await Promise.all([
+      api('/cameras'),
+      api('/locations'),
+      api('/events'),
+      api('/recordings/stats'),
+    ]);
+    const locations = sortLocationsNaturally(rawLocations);
+    state.cameras = cameras;
+    state.locations = locations;
+    renderDashboard(cameras, locations, events, recStats);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderDashboard(cameras, locations, events, recStats) {
+  const total = cameras.length;
+  const online = cameras.filter((c) => c.stream.active).length;
+  const recording = cameras.filter((c) => c.recording_active).length;
+  const motionActive = cameras.filter((c) => c.motion_active).length;
+
+  const statsEl = $('#dashboard-stats');
+  if (statsEl) {
+    const tiles = [
+      { tone: 'info', value: total, label: 'Total kamera' },
+      { tone: 'success', value: `${online}<span class="stat-sub">/${total}</span>`, label: 'Live aktif sekarang' },
+      { tone: 'error', value: recording, label: 'Sedang merekam' },
+      { tone: 'warn', value: motionActive, label: 'Motion aktif' },
+      { tone: 'user', value: locations.length, label: 'Lokasi terdaftar' },
+      { tone: 'neutral', value: formatBytes(recStats.total_bytes), label: `Penyimpanan rekaman (${recStats.count} file)` },
+    ];
+    statsEl.innerHTML = tiles.map((t) => `
+      <div class="stat-tile">
+        <div class="stat-icon tone-${t.tone}">${TONE_ICON[t.tone] || TONE_ICON.neutral}</div>
+        <div class="stat-body">
+          <div class="stat-value">${t.value}</div>
+          <div class="stat-label">${t.label}</div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  const locEl = $('#dashboard-locations');
+  if (locEl) {
+    if (locations.length === 0) {
+      locEl.innerHTML = '<div class="empty-state">Belum ada lokasi. Tambahkan di menu Peta Lokasi.</div>';
+    } else {
+      locEl.innerHTML = locations.map((loc) => {
+        const camsHere = cameras.filter((c) => c.location_id === loc.id);
+        const onlineHere = camsHere.filter((c) => c.stream.active).length;
+        const pct = camsHere.length ? Math.round((onlineHere / camsHere.length) * 100) : 0;
+        return `
+          <div class="location-status-row" data-loc-id="${loc.id}">
+            <div class="location-status-info">
+              <div class="location-status-name">${escapeHtml(loc.name)}</div>
+              <div class="location-status-meta">${onlineHere}/${camsHere.length} kamera online</div>
+            </div>
+            <div class="location-status-bar"><div class="location-status-fill" style="width:${pct}%"></div></div>
+          </div>
+        `;
+      }).join('');
+      locEl.querySelectorAll('[data-loc-id]').forEach((row) => {
+        row.addEventListener('click', () => goToLocationCameras(Number(row.dataset.locId)));
+      });
+    }
+  }
+
+  const evEl = $('#dashboard-events');
+  if (evEl) {
+    const recent = events.slice(0, 6);
+    if (recent.length === 0) {
+      evEl.innerHTML = '<div class="empty-state">Belum ada aktivitas.</div>';
+    } else {
+      evEl.innerHTML = recent.map((r) => {
+        const meta = EVENT_META[r.type] || { label: r.type, tone: 'neutral' };
+        return `
+          <div class="event-item tone-${meta.tone}">
+            <div class="event-icon">${TONE_ICON[meta.tone] || TONE_ICON.neutral}</div>
+            <div class="event-body">
+              <div class="event-top">
+                <span class="event-title">${escapeHtml(meta.label)}</span>
+                <span class="event-time">${new Date(r.created_at).toLocaleString('id-ID')}</span>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+}
+
+const EVENT_META = {
+  camera_added: { label: 'Kamera ditambahkan', tone: 'info', group: 'camera' },
+  onvif_probe_ok: { label: 'ONVIF probe berhasil', tone: 'success', group: 'camera' },
+  stream_started: { label: 'Live stream dimulai', tone: 'success', group: 'stream' },
+  stream_stopped: { label: 'Live stream dihentikan', tone: 'neutral', group: 'stream' },
+  stream_error: { label: 'Live stream error', tone: 'error', group: 'stream' },
+  stream_reconnecting: { label: 'Live stream menyambung ulang', tone: 'warn', group: 'stream' },
+  recording_started: { label: 'Rekaman dimulai', tone: 'success', group: 'recording' },
+  recording_stopped: { label: 'Rekaman dihentikan', tone: 'neutral', group: 'recording' },
+  recording_purged: { label: 'Rekaman lama dihapus', tone: 'neutral', group: 'recording' },
+  recording_error: { label: 'Rekaman error', tone: 'error', group: 'recording' },
+  motion_detected: { label: 'Gerakan terdeteksi', tone: 'warn', group: 'motion' },
+  motion_recording_started: { label: 'Rekaman motion dimulai', tone: 'warn', group: 'motion' },
+  motion_detector_started: { label: 'Motion detection aktif', tone: 'info', group: 'motion' },
+  motion_detector_stopped: { label: 'Motion detection nonaktif', tone: 'neutral', group: 'motion' },
+  motion_detector_error: { label: 'Motion detector error', tone: 'error', group: 'motion' },
+  user_created: { label: 'User dibuat', tone: 'user', group: 'user' },
+  user_updated: { label: 'User diperbarui', tone: 'user', group: 'user' },
+  user_deleted: { label: 'User dihapus', tone: 'user', group: 'user' },
+  location_added: { label: 'Lokasi ditambahkan', tone: 'info', group: 'location' },
+  location_updated: { label: 'Lokasi diperbarui', tone: 'info', group: 'location' },
+  location_deleted: { label: 'Lokasi dihapus', tone: 'neutral', group: 'location' },
+  camera_offline: { label: 'Kamera offline', tone: 'error', group: 'camera' },
+  camera_online: { label: 'Kamera kembali online', tone: 'success', group: 'camera' },
+  settings_updated: { label: 'Pengaturan diperbarui', tone: 'info', group: 'other' },
+};
+
+const TONE_ICON = {
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>',
+  success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>',
+  warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg>',
+  neutral: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+  user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+};
+
+let eventsCache = [];
+let eventsFilter = 'all';
+
+async function loadEvents() {
+  try {
+    eventsCache = await api('/events');
+    renderEvents();
+  } catch (e) { console.error(e); }
+}
+
+function renderEvents() {
+  const list = $('#events-table');
+  if (!list) return;
+  const filtered = eventsCache.filter((r) => {
+    const meta = EVENT_META[r.type];
+    if (eventsFilter === 'all') return true;
+    if (eventsFilter === 'error') return (meta?.tone || 'neutral') === 'error';
+    return (meta?.group || 'other') === eventsFilter;
+  });
+
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="empty-state">Belum ada peristiwa untuk filter ini.</div>';
+    return;
+  }
+
+  list.innerHTML = filtered.map((r) => {
+    const meta = EVENT_META[r.type] || { label: r.type, tone: 'neutral' };
+    const cam = state.cameras.find((c) => c.id === r.camera_id);
+    const camLabel = cam ? cam.name : (r.camera_id ? `Kamera #${r.camera_id}` : 'Sistem');
+    return `
+      <div class="event-item tone-${meta.tone}">
+        <div class="event-icon">${TONE_ICON[meta.tone] || TONE_ICON.neutral}</div>
+        <div class="event-body">
+          <div class="event-top">
+            <span class="event-title">${escapeHtml(meta.label)}</span>
+            <span class="event-time">${new Date(r.created_at).toLocaleString('id-ID')}</span>
+          </div>
+          ${r.message ? `<div class="event-message">${escapeHtml(r.message)}</div>` : ''}
+          <div class="event-cam">${escapeHtml(camLabel)}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+$('#event-filters')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.chip');
+  if (!btn) return;
+  eventsFilter = btn.dataset.filter;
+  document.querySelectorAll('#event-filters .chip').forEach((c) => c.classList.toggle('active', c === btn));
+  renderEvents();
+});
+
+// ---- Pengaturan (Settings) ----
+
+document.querySelectorAll('#settings-sub-tabs .sub-tab').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#settings-sub-tabs .sub-tab').forEach((b) => b.classList.toggle('active', b === btn));
+    const tab = btn.dataset.settingsTab;
+    ['branding', 'email', 'recording', 'performance', 'healthcheck'].forEach((t) => {
+      $(`#settings-tab-${t}`)?.classList.toggle('hidden', t !== tab);
+    });
+  });
+});
+
+async function loadSettingsPage() {
+  try {
+    const s = await api('/settings');
+    $('#settings-app-name').value = s.app_name || '';
+    $('#settings-smtp-enabled').checked = s.smtp_enabled === 'true';
+    $('#settings-smtp-host').value = s.smtp_host || '';
+    $('#settings-smtp-port').value = s.smtp_port || '';
+    $('#settings-smtp-user').value = s.smtp_user || '';
+    $('#settings-smtp-pass').value = '';
+    $('#settings-smtp-pass').placeholder = s.smtp_pass_set ? 'Sudah diatur — kosongkan kalau tidak diubah' : 'Kosongkan kalau tidak diubah';
+    $('#settings-notify-to').value = s.notify_email_to || '';
+    $('#settings-retention').value = s.retention_days || 14;
+    $('#settings-stream-width').value = s.stream_max_width || 960;
+    $('#settings-stream-fps').value = s.stream_fps || 15;
+    $('#settings-hwaccel').value = s.hwaccel_mode || 'auto';
+    $('#settings-health-interval').value = s.health_check_interval_min || 5;
+    $('#settings-offline-threshold').value = s.offline_threshold_checks || 2;
+
+    const preview = $('#settings-logo-preview');
+    if (s.logo_path) {
+      preview.src = s.logo_path;
+      preview.classList.remove('hidden');
+    } else {
+      preview.classList.add('hidden');
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+// Each section saves independently — PUT /settings only touches whatever
+// keys are in the body, so saving SMTP never re-sends (and can't clobber)
+// branding/recording/performance/health-check fields. Deliberately does NOT
+// reload the whole settings form afterward either: doing so would overwrite
+// any not-yet-saved text the admin has typed into a *different* section's
+// inputs while they were on this page.
+async function saveSettingsSection(msgSelector, body, afterSave) {
+  const msg = $(msgSelector);
+  msg.textContent = '';
+  msg.className = 'form-msg';
+  try {
+    await api('/settings', { method: 'PUT', body });
+    msg.textContent = 'Tersimpan.';
+    msg.classList.add('ok');
+    if (afterSave) afterSave();
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('error');
+  }
+}
+
+$('#settings-save-branding-btn')?.addEventListener('click', () => saveSettingsSection('#settings-branding-msg', {
+  app_name: $('#settings-app-name').value.trim() || 'Open VMS',
+}, loadBranding));
+
+$('#settings-save-email-btn')?.addEventListener('click', () => saveSettingsSection('#settings-email-msg', {
+  smtp_enabled: $('#settings-smtp-enabled').checked ? 'true' : 'false',
+  smtp_host: $('#settings-smtp-host').value.trim(),
+  smtp_port: $('#settings-smtp-port').value.trim(),
+  smtp_user: $('#settings-smtp-user').value.trim(),
+  smtp_pass: $('#settings-smtp-pass').value, // blank = server keeps existing
+  notify_email_to: $('#settings-notify-to').value.trim(),
+}, () => {
+  // Don't leave a just-typed password sitting in the field once it's saved.
+  $('#settings-smtp-pass').value = '';
+  $('#settings-smtp-pass').placeholder = 'Sudah diatur — kosongkan kalau tidak diubah';
+}));
+
+$('#settings-save-recording-btn')?.addEventListener('click', () => saveSettingsSection('#settings-recording-msg', {
+  retention_days: $('#settings-retention').value.trim(),
+}));
+
+$('#settings-save-performance-btn')?.addEventListener('click', () => saveSettingsSection('#settings-performance-msg', {
+  stream_max_width: $('#settings-stream-width').value.trim(),
+  stream_fps: $('#settings-stream-fps').value.trim(),
+  hwaccel_mode: $('#settings-hwaccel').value,
+}));
+
+$('#settings-save-healthcheck-btn')?.addEventListener('click', () => saveSettingsSection('#settings-healthcheck-msg', {
+  health_check_interval_min: $('#settings-health-interval').value.trim(),
+  offline_threshold_checks: $('#settings-offline-threshold').value.trim(),
+}));
+
+$('#settings-test-email-btn')?.addEventListener('click', async () => {
+  const msg = $('#settings-email-msg');
+  msg.textContent = 'Mengirim...';
+  msg.className = 'form-msg';
+  try {
+    await api('/settings/test-email', { method: 'POST' });
+    msg.textContent = 'Email test berhasil dikirim — cek inbox tujuan.';
+    msg.classList.add('ok');
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('error');
+  }
+});
+
+$('#settings-logo-file')?.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const msg = $('#settings-logo-msg');
+  msg.textContent = 'Mengupload...';
+  msg.className = 'form-msg';
+  try {
+    const formData = new FormData();
+    formData.append('logo', file);
+    const res = await fetch('/api/settings/logo', {
+      method: 'POST',
+      headers: state.token ? { Authorization: `Bearer ${state.token}` } : {},
+      body: formData,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+
+    const preview = $('#settings-logo-preview');
+    preview.src = data.logo_path;
+    preview.classList.remove('hidden');
+    msg.textContent = 'Logo tersimpan.';
+    msg.classList.add('ok');
+    await loadBranding();
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.classList.add('error');
+  } finally {
+    e.target.value = '';
+  }
+});
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---- Alert / notification center ----
+
+let alertPanelOpen = false;
+const ALERT_TONE_COLOR = { error: 'var(--rec)', success: 'var(--live)', warn: '#f59e0b', info: 'var(--accent)', neutral: 'var(--text-faint)' };
+
+async function refreshAlertBadge() {
+  try {
+    const { count } = await api('/alerts/count');
+    const badge = $('#alert-bell-badge');
+    if (!badge) return;
+    if (count > 0) {
+      badge.textContent = count > 99 ? '99+' : String(count);
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  } catch (e) { console.error(e); }
+}
+
+async function loadAlertPanel() {
+  const list = $('#alert-panel-list');
+  list.innerHTML = '<div class="alert-panel-empty">Memuat...</div>';
+  try {
+    const alerts = await api('/alerts');
+    if (alerts.length === 0) {
+      list.innerHTML = '<div class="alert-panel-empty">Tidak ada notifikasi.</div>';
+      return;
+    }
+    list.innerHTML = alerts.map((a) => {
+      const meta = EVENT_META[a.type] || { label: a.type, tone: 'neutral' };
+      const cam = state.cameras.find((c) => c.id === a.camera_id);
+      return `
+        <div class="alert-item ${a.acknowledged ? '' : 'unread'}" data-alert-id="${a.id}" data-alert-cam="${a.camera_id || ''}">
+          <span class="alert-item-dot" style="background:${ALERT_TONE_COLOR[meta.tone] || ALERT_TONE_COLOR.neutral}"></span>
+          <div class="alert-item-body">
+            <div class="alert-item-title">${escapeHtml(meta.label)}${cam ? ` — ${escapeHtml(cam.name)}` : ''}</div>
+            ${a.message ? `<div class="alert-item-msg">${escapeHtml(a.message)}</div>` : ''}
+            <div class="alert-item-time">${new Date(a.created_at).toLocaleString('id-ID')}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    list.querySelectorAll('[data-alert-id]').forEach((item) => {
+      item.addEventListener('click', async () => {
+        const id = Number(item.dataset.alertId);
+        const camId = item.dataset.alertCam ? Number(item.dataset.alertCam) : null;
+        try { await api(`/alerts/${id}/ack`, { method: 'POST' }); } catch (e) { console.error(e); }
+        item.classList.remove('unread');
+        refreshAlertBadge();
+        if (camId) {
+          closeAlertPanel();
+          document.querySelector('.nav-item[data-view="live"]')?.click();
+          setTimeout(() => {
+            const cam = state.cameras.find((c) => c.id === camId);
+            if (cam) openFocusView(camId);
+          }, 400);
+        }
+      });
+    });
+  } catch (e) {
+    list.innerHTML = '<div class="alert-panel-empty">Gagal memuat notifikasi.</div>';
+  }
+}
+
+function openAlertPanel() {
+  alertPanelOpen = true;
+  $('#alert-panel').classList.remove('hidden');
+  loadAlertPanel();
+}
+function closeAlertPanel() {
+  alertPanelOpen = false;
+  $('#alert-panel')?.classList.add('hidden');
+}
+
+$('#alert-bell-btn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (alertPanelOpen) closeAlertPanel();
+  else openAlertPanel();
+});
+document.addEventListener('click', (e) => {
+  if (alertPanelOpen && !e.target.closest('#alert-panel') && !e.target.closest('#alert-bell-btn')) closeAlertPanel();
+});
+$('#alert-ack-all-btn')?.addEventListener('click', async (e) => {
+  e.stopPropagation();
+  try {
+    await api('/alerts/ack-all', { method: 'POST' });
+    await loadAlertPanel();
+    await refreshAlertBadge();
+  } catch (err) {
+    alert(err.message);
+  }
+});

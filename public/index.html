@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Open VMS — Unified Video Management</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f8cff'/%3E%3Cstop offset='1' stop-color='%237c5cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='24' height='24' rx='6' fill='url(%23g)'/%3E%3Ccircle cx='12' cy='12' r='4.5' fill='white' fill-opacity='0.92'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%234f8cff'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="style.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+
+<div id="login-screen">
+  <div class="login-box">
+    <div class="login-logo" id="login-logo">
+      <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4.5" fill="white" fill-opacity="0.95"/><circle cx="12" cy="12" r="1.8" fill="#4f8cff"/></svg>
+    </div>
+    <h1 id="login-app-name">Open VMS</h1>
+    <p class="sub">Masuk untuk mengakses semua kamera dari satu portal</p>
+    <div class="field-label">Username</div>
+    <input id="login-username" type="text" placeholder="Masukkan username" autocomplete="username" />
+    <div class="field-label">Password</div>
+    <input id="login-password" type="password" placeholder="Masukkan password" autocomplete="current-password" />
+    <div class="login-error" id="login-error"></div>
+    <button id="login-btn">Masuk</button>
+    <div class="login-foot">Unified Video Management System</div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <div class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" id="sidebar-brand-mark"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4.5" fill="white" fill-opacity="0.95"/><circle cx="12" cy="12" r="1.8" fill="#4f8cff"/></svg></span>
+      <span id="sidebar-app-name">Open VMS</span>
+      <button class="alert-bell" id="alert-bell-btn" title="Notifikasi">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span class="alert-bell-badge hidden" id="alert-bell-badge">0</span>
+      </button>
+    </div>
+
+    <div class="alert-panel hidden" id="alert-panel">
+      <div class="alert-panel-header">
+        <span>Notifikasi</span>
+        <button id="alert-ack-all-btn">Tandai semua dibaca</button>
+      </div>
+      <div class="alert-panel-list" id="alert-panel-list"></div>
+    </div>
+    <div class="nav-item active" data-view="dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+      Dashboard
+    </div>
+    <div class="nav-item" data-view="live">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l4.55-2.28A1 1 0 0 1 21 8.62v6.76a1 1 0 0 1-1.45.9L15 14"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg>
+      Live view
+    </div>
+    <div class="nav-item" data-view="map">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.1-7-11a7 7 0 0 1 14 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>
+      Peta Lokasi
+    </div>
+    <div class="nav-item" data-view="recordings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/></svg>
+      Rekaman
+    </div>
+    <div class="nav-item" data-view="events">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      Log peristiwa
+    </div>
+    <div class="nav-item" data-view="users" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      Manajemen User
+    </div>
+    <div class="nav-item" data-view="settings" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      Pengaturan
+    </div>
+    <div class="sidebar-footer">
+      <div id="whoami"></div>
+      <button class="btn secondary" id="logout-btn">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
+        Keluar
+      </button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div id="view-dashboard">
+      <div class="main-header"><h2>Dashboard</h2></div>
+
+      <div class="stat-grid" id="dashboard-stats"></div>
+
+      <div class="dashboard-columns">
+        <div class="dashboard-panel">
+          <h3>Status per Lokasi</h3>
+          <div id="dashboard-locations"></div>
+        </div>
+        <div class="dashboard-panel">
+          <h3>Aktivitas Terbaru</h3>
+          <div id="dashboard-events"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="view-live" class="hidden">
+      <div class="main-header">
+        <h2>Live view</h2>
+        <div class="header-actions">
+          <button class="btn secondary" id="stream-stop-all-btn" title="Hentikan semua live view">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>
+            Hentikan Semua
+          </button>
+          <button class="btn secondary" id="stream-start-all-btn" title="Nyalakan semua live view">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4l13 8-13 8V4z"/></svg>
+            Nyalakan Semua
+          </button>
+          <button class="btn secondary" id="import-csv-btn" title="Import banyak kamera sekaligus dari file CSV">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            Import CSV
+          </button>
+          <button class="btn" id="add-camera-btn">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Tambah kamera
+          </button>
+        </div>
+      </div>
+
+      <div class="live-body">
+      <div class="location-tree-panel" id="location-tree-panel">
+        <div class="location-tree-header">Lokasi</div>
+        <div class="location-tree" id="location-tree"></div>
+      </div>
+      <div class="live-main">
+      <div class="layout-toolbar">
+        <div class="camera-search">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input id="camera-search-input" type="text" placeholder="Cari kamera (nama, IP, merek, lokasi)..." />
+          <button id="camera-search-clear" class="hidden" title="Hapus pencarian">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <select id="status-filter-select" class="status-filter-select">
+          <option value="">Semua Status</option>
+          <option value="active">Aktif</option>
+          <option value="inactive">Tidak Aktif</option>
+        </select>
+        <select id="capability-filter-select" class="status-filter-select">
+          <option value="">Semua Fungsi</option>
+          <option value="ptz">Mendukung PTZ</option>
+          <option value="motion">Motion Detection Aktif</option>
+          <option value="recording">Rekaman Berkelanjutan Aktif</option>
+          <option value="relay">Kamera Relay</option>
+        </select>
+        <div class="layout-controls">
+        <div class="layout-picker" id="layout-picker">
+          <button class="layout-btn active" data-layout="auto" title="Otomatis">
+            <svg viewBox="0 0 20 20" fill="currentColor"><rect x="1" y="1" width="8" height="8" rx="1"/><rect x="11" y="1" width="8" height="4.5" rx="1"/><rect x="11" y="6.5" width="8" height="4.5" rx="1"/><rect x="1" y="11" width="18" height="8" rx="1"/></svg>
+          </button>
+          <button class="layout-btn" data-layout="1x1" title="1 kamera">
+            <svg viewBox="0 0 20 20" fill="currentColor"><rect x="1" y="2" width="18" height="16" rx="1.5"/></svg>
+          </button>
+          <button class="layout-btn" data-layout="2x2" title="2 x 2">
+            <svg viewBox="0 0 20 20" fill="currentColor"><rect x="1" y="1" width="8.5" height="8.5" rx="1"/><rect x="10.5" y="1" width="8.5" height="8.5" rx="1"/><rect x="1" y="10.5" width="8.5" height="8.5" rx="1"/><rect x="10.5" y="10.5" width="8.5" height="8.5" rx="1"/></svg>
+          </button>
+          <button class="layout-btn" data-layout="3x3" title="3 x 3">
+            <svg viewBox="0 0 20 20" fill="currentColor"><rect x="1" y="1" width="5.3" height="5.3" rx="0.8"/><rect x="7.35" y="1" width="5.3" height="5.3" rx="0.8"/><rect x="13.7" y="1" width="5.3" height="5.3" rx="0.8"/><rect x="1" y="7.35" width="5.3" height="5.3" rx="0.8"/><rect x="7.35" y="7.35" width="5.3" height="5.3" rx="0.8"/><rect x="13.7" y="7.35" width="5.3" height="5.3" rx="0.8"/><rect x="1" y="13.7" width="5.3" height="5.3" rx="0.8"/><rect x="7.35" y="13.7" width="5.3" height="5.3" rx="0.8"/><rect x="13.7" y="13.7" width="5.3" height="5.3" rx="0.8"/></svg>
+          </button>
+          <button class="layout-btn" data-layout="4x4" title="4 x 4">
+            <svg viewBox="0 0 20 20" fill="currentColor"><rect x="1" y="1" width="3.7" height="3.7" rx="0.6"/><rect x="5.4" y="1" width="3.7" height="3.7" rx="0.6"/><rect x="9.8" y="1" width="3.7" height="3.7" rx="0.6"/><rect x="14.2" y="1" width="3.7" height="3.7" rx="0.6"/><rect x="1" y="5.4" width="3.7" height="3.7" rx="0.6"/><rect x="5.4" y="5.4" width="3.7" height="3.7" rx="0.6"/><rect x="9.8" y="5.4" width="3.7" height="3.7" rx="0.6"/><rect x="14.2" y="5.4" width="3.7" height="3.7" rx="0.6"/><rect x="1" y="9.8" width="3.7" height="3.7" rx="0.6"/><rect x="5.4" y="9.8" width="3.7" height="3.7" rx="0.6"/><rect x="9.8" y="9.8" width="3.7" height="3.7" rx="0.6"/><rect x="14.2" y="9.8" width="3.7" height="3.7" rx="0.6"/><rect x="1" y="14.2" width="3.7" height="3.7" rx="0.6"/><rect x="5.4" y="14.2" width="3.7" height="3.7" rx="0.6"/><rect x="9.8" y="14.2" width="3.7" height="3.7" rx="0.6"/><rect x="14.2" y="14.2" width="3.7" height="3.7" rx="0.6"/></svg>
+          </button>
+          <button class="layout-btn" data-layout="spotlight" title="1 utama + 5 kecil">
+            <svg viewBox="0 0 20 20" fill="currentColor"><rect x="1" y="1" width="11.5" height="17" rx="1.2"/><rect x="14" y="1" width="5" height="3" rx="0.6"/><rect x="14" y="4.6" width="5" height="3" rx="0.6"/><rect x="14" y="8.2" width="5" height="3" rx="0.6"/><rect x="14" y="11.8" width="5" height="3" rx="0.6"/><rect x="14" y="15" width="5" height="3" rx="0.6"/></svg>
+          </button>
+        </div>
+        <div class="layout-pager hidden" id="layout-pager">
+          <button id="layout-prev" title="Halaman sebelumnya">‹</button>
+          <span id="layout-page-label">Halaman 1/1</span>
+          <button id="layout-next" title="Halaman berikutnya">›</button>
+        </div>
+        </div>
+      </div>
+
+      <div class="grid" id="camera-grid"></div>
+      </div>
+      </div>
+    </div>
+
+    <div id="view-map" class="hidden">
+      <div class="main-header">
+        <h2>Peta Lokasi</h2>
+        <button class="btn" id="add-location-btn">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Tambah Lokasi
+        </button>
+      </div>
+
+      <div class="sub-tabs" id="map-sub-tabs">
+        <button class="sub-tab active" data-subtab="list">Daftar Lokasi</button>
+        <button class="sub-tab" data-subtab="map">Peta</button>
+      </div>
+
+      <div id="map-subview-list">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Nama</th><th>Alamat</th><th>Koordinat</th><th>Kamera</th><th></th></tr></thead>
+            <tbody id="locations-table"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="map-subview-map" class="hidden">
+        <p class="map-hint">Klik di peta untuk menambah lokasi baru, klik pin untuk lihat kamera di lokasi itu, atau seret pin untuk memindahkan posisinya.</p>
+        <div id="location-map"></div>
+      </div>
+    </div>
+
+    <div id="view-recordings" class="hidden">
+      <div class="main-header"><h2>Rekaman</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Kamera</th><th>File</th><th>Mulai</th><th>Ukuran</th><th></th></tr></thead>
+          <tbody id="recordings-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="view-events" class="hidden">
+      <div class="main-header"><h2>Log peristiwa</h2></div>
+      <div class="event-filters" id="event-filters">
+        <button class="chip active" data-filter="all">Semua</button>
+        <button class="chip" data-filter="camera">Kamera</button>
+        <button class="chip" data-filter="stream">Live</button>
+        <button class="chip" data-filter="recording">Rekaman</button>
+        <button class="chip" data-filter="motion">Motion</button>
+        <button class="chip" data-filter="user">User</button>
+        <button class="chip" data-filter="location">Lokasi</button>
+        <button class="chip" data-filter="error">Error</button>
+      </div>
+      <div class="events-list" id="events-table"></div>
+    </div>
+
+    <div id="view-users" class="hidden">
+      <div class="main-header">
+        <h2>Manajemen User</h2>
+        <button class="btn" id="add-user-btn">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Tambah user
+        </button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Username</th><th>Role</th><th>Dibuat</th><th></th></tr></thead>
+          <tbody id="users-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="view-settings" class="hidden">
+      <div class="main-header"><h2>Pengaturan</h2></div>
+
+      <div class="sub-tabs" id="settings-sub-tabs">
+        <button class="sub-tab active" data-settings-tab="branding">Branding</button>
+        <button class="sub-tab" data-settings-tab="email">Notifikasi Email</button>
+        <button class="sub-tab" data-settings-tab="recording">Rekaman</button>
+        <button class="sub-tab" data-settings-tab="performance">Performa Live View</button>
+        <button class="sub-tab" data-settings-tab="healthcheck">Health Check</button>
+      </div>
+
+      <div id="settings-tab-branding" class="settings-section">
+        <h3>Branding Aplikasi</h3>
+        <div class="field">
+          <label>Nama aplikasi</label>
+          <input id="settings-app-name" type="text" placeholder="Open VMS" />
+        </div>
+        <div class="field">
+          <label>Logo</label>
+          <div class="logo-upload-row">
+            <div class="logo-preview-box"><img id="settings-logo-preview" class="hidden" /></div>
+            <div>
+              <input type="file" id="settings-logo-file" accept="image/png,image/jpeg,image/svg+xml,image/webp" />
+              <div class="field-hint">PNG/JPG/SVG/WebP, maksimal 2MB. Diupload otomatis begitu dipilih.</div>
+            </div>
+          </div>
+          <div class="form-msg" id="settings-logo-msg"></div>
+        </div>
+        <div class="settings-actions">
+          <button class="btn" id="settings-save-branding-btn">Simpan Branding</button>
+          <div class="form-msg" id="settings-branding-msg"></div>
+        </div>
+      </div>
+
+      <div id="settings-tab-email" class="settings-section hidden">
+        <h3>Notifikasi Email (SMTP)</h3>
+        <label class="toggle-field">
+          <input type="checkbox" id="settings-smtp-enabled" /> Aktifkan notifikasi email kamera offline/online
+        </label>
+        <div class="settings-grid">
+          <div class="field"><label>SMTP Host</label><input id="settings-smtp-host" type="text" placeholder="smtp.office365.com" /></div>
+          <div class="field"><label>SMTP Port</label><input id="settings-smtp-port" type="number" placeholder="587" /></div>
+          <div class="field"><label>Username SMTP</label><input id="settings-smtp-user" type="text" placeholder="pengirim@domain.com" /></div>
+          <div class="field"><label>Password SMTP</label><input id="settings-smtp-pass" type="password" placeholder="Kosongkan kalau tidak diubah" /></div>
+          <div class="field span-2"><label>Email tujuan notifikasi</label><input id="settings-notify-to" type="text" placeholder="email1@domain.com, email2@domain.com" /></div>
+        </div>
+        <div class="settings-actions">
+          <button class="btn" id="settings-save-email-btn">Simpan Notifikasi Email</button>
+          <button class="btn secondary" id="settings-test-email-btn">Kirim Email Test</button>
+        </div>
+        <div class="form-msg" id="settings-email-msg"></div>
+      </div>
+
+      <div id="settings-tab-recording" class="settings-section hidden">
+        <h3>Rekaman</h3>
+        <div class="settings-grid">
+          <div class="field"><label>Retensi rekaman (hari)</label><input id="settings-retention" type="number" min="1" /></div>
+        </div>
+        <div class="settings-actions">
+          <button class="btn" id="settings-save-recording-btn">Simpan Rekaman</button>
+          <div class="form-msg" id="settings-recording-msg"></div>
+        </div>
+      </div>
+
+      <div id="settings-tab-performance" class="settings-section hidden">
+        <h3>Performa Live View</h3>
+        <div class="settings-grid">
+          <div class="field"><label>Lebar maksimum hasil transcode (px)</label><input id="settings-stream-width" type="number" min="320" /></div>
+          <div class="field"><label>Frame rate</label><input id="settings-stream-fps" type="number" min="1" max="30" /></div>
+          <div class="field"><label>Mode encoder</label>
+            <select id="settings-hwaccel">
+              <option value="auto">Auto (hardware, fallback ke software)</option>
+              <option value="software">Software saja</option>
+            </select>
+          </div>
+        </div>
+        <div class="settings-actions">
+          <button class="btn" id="settings-save-performance-btn">Simpan Performa</button>
+          <div class="form-msg" id="settings-performance-msg"></div>
+        </div>
+      </div>
+
+      <div id="settings-tab-healthcheck" class="settings-section hidden">
+        <h3>Health Check Kamera Offline</h3>
+        <div class="settings-grid">
+          <div class="field"><label>Interval cek konektivitas (menit)</label><input id="settings-health-interval" type="number" min="1" /></div>
+          <div class="field"><label>Ambang gagal berturut-turut baru dianggap offline</label><input id="settings-offline-threshold" type="number" min="1" /></div>
+        </div>
+        <div class="settings-actions">
+          <button class="btn" id="settings-save-healthcheck-btn">Simpan Health Check</button>
+          <div class="form-msg" id="settings-healthcheck-msg"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="camera-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h3 id="camera-modal-title">Tambah kamera</h3>
+    <div class="field">
+      <label>Nama kamera</label>
+      <input id="cam-name" type="text" placeholder="Contoh: Gerbang Depan" />
+    </div>
+    <div class="field location-field">
+      <label>📍 Lokasi — kamera ini di mana?</label>
+      <div class="location-field-row">
+        <select id="cam-location"><option value="">Tidak ditentukan</option></select>
+        <button type="button" class="btn secondary" id="cam-add-location-btn">+ Lokasi baru</button>
+      </div>
+      <div class="field" style="margin: 10px 0 0">
+        <label>🏢 Gedung (opsional) — kalau lokasi ini punya beberapa gedung</label>
+        <input id="cam-building" type="text" placeholder="Contoh: Gedung A, Lantai 2, dll" />
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Merek</label>
+        <input id="cam-brand" type="text" placeholder="Hikvision / Dahua / dll" />
+      </div>
+      <div class="field">
+        <label>Alamat IP</label>
+        <input id="cam-ip" type="text" placeholder="192.168.1.10" />
+      </div>
+    </div>
+    <div class="field relay-field">
+      <label><input id="cam-is-relay" type="checkbox" /> 🔌 Kamera ini di jaringan privat (pakai Relay Agent)</label>
+      <p class="field-hint">Centang kalau IP kamera ini privat (192.168.x.x / 10.x.x.x) dan tidak bisa dijangkau langsung dari server ini. Server tidak akan konek langsung ke kamera — video dikirim (push) dari agen kecil yang dijalankan di PC pada jaringan lokal kamera itu.</p>
+      <div id="cam-relay-token-box" class="relay-token-box hidden">
+        <div class="relay-token-label">✅ Kamera tersimpan. Jalankan agen di PC lokasi kamera ini:</div>
+        <code id="cam-relay-token-value"></code>
+        <button type="button" class="btn secondary" id="cam-relay-copy-btn">Salin perintah agen</button>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Port ONVIF</label>
+        <input id="cam-onvif-port" type="number" value="80" />
+      </div>
+      <div class="field">
+        <label>Port RTSP</label>
+        <input id="cam-rtsp-port" type="number" value="554" />
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Username kamera</label>
+        <input id="cam-username" type="text" placeholder="admin" />
+      </div>
+      <div class="field">
+        <label>Password kamera</label>
+        <input id="cam-password" type="password" />
+      </div>
+    </div>
+    <div class="field">
+      <label>RTSP path manual (opsional, jika tidak pakai ONVIF probe) — isi hanya path-nya, contoh: <code>/Streaming/Channels/101</code>, jangan tempel URL rtsp:// lengkap</label>
+      <input id="cam-rtsp-path" type="text" placeholder="/Streaming/Channels/101" />
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label><input id="cam-motion-enabled" type="checkbox" /> Aktifkan motion detection</label>
+      </div>
+      <div class="field">
+        <label><input id="cam-motion-recording" type="checkbox" /> Rekam saat motion</label>
+      </div>
+    </div>
+    <div class="field">
+      <label>Sensitivitas motion (0.01–0.50)</label>
+      <input id="cam-motion-sensitivity" type="number" min="0.01" max="0.5" step="0.01" value="0.04" />
+    </div>
+    <div class="form-msg" id="cam-form-msg"></div>
+    <div class="modal-actions">
+      <button class="btn secondary" id="cam-cancel-btn">Batal</button>
+      <button class="btn" id="cam-save-btn">Simpan kamera</button>
+    </div>
+  </div>
+</div>
+
+<div id="import-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h3>Import kamera dari CSV</h3>
+    <p class="field-hint">
+      Kolom: <code>name,brand,ip,rtsp_port,onvif_port,username,password,rtsp_path,location</code>.
+      Hanya <code>name</code> dan <code>ip</code> yang wajib diisi. Kolom <code>location</code> diisi nama lokasi yang sudah terdaftar di Peta Lokasi (opsional).
+      <br /><a href="#" id="import-template-link">Unduh contoh CSV</a>
+    </p>
+    <div class="field">
+      <label>Pilih file CSV</label>
+      <input id="import-file-input" type="file" accept=".csv,text/csv" />
+    </div>
+    <div id="import-preview" class="import-preview hidden"></div>
+    <div id="import-results" class="import-results hidden"></div>
+    <div class="form-msg" id="import-form-msg"></div>
+    <div class="modal-actions">
+      <button class="btn secondary" id="import-cancel-btn">Batal</button>
+      <button class="btn" id="import-start-btn" disabled>Mulai Import</button>
+    </div>
+  </div>
+</div>
+
+<div id="player-modal" class="modal-overlay hidden">
+  <div class="modal player-modal">
+    <div class="player-modal-header">
+      <div>
+        <h3 id="player-title">Putar rekaman</h3>
+        <p id="player-subtitle" class="player-subtitle"></p>
+      </div>
+      <button class="btn secondary" id="player-close-btn">Tutup</button>
+    </div>
+    <video id="player-video" controls></video>
+    <div class="modal-actions">
+      <a class="btn secondary" id="player-download-link" download>Unduh file ini</a>
+    </div>
+  </div>
+</div>
+
+<div id="focus-modal" class="modal-overlay hidden">
+  <div class="modal focus-modal">
+    <div class="player-modal-header">
+      <div>
+        <h3 id="focus-title">Kamera</h3>
+        <p id="focus-subtitle" class="player-subtitle"></p>
+      </div>
+      <button class="btn secondary" id="focus-close-btn">Tutup</button>
+    </div>
+    <div class="focus-video-wrap">
+      <video id="focus-video" muted playsinline></video>
+      <div class="placeholder" id="focus-placeholder"></div>
+      <div class="status-badge">
+        <span class="status-pill" id="focus-status-live"><span class="status-dot live"></span>Live</span>
+        <span class="status-pill" id="focus-status-rec"><span class="status-dot rec"></span>Rec</span>
+        <span class="status-pill" id="focus-status-motion"><span class="status-dot motion"></span>Motion</span>
+      </div>
+    </div>
+    <div class="tile-controls">
+      <button id="focus-stream-btn">Live</button>
+      <button id="focus-record-btn">Rekam</button>
+      <button id="focus-probe-btn">Probe ONVIF</button>
+    </div>
+    <div class="tile-controls">
+      <button id="focus-motion-btn">Hidupkan Motion</button>
+    </div>
+    <div class="ptz-grid hidden" id="focus-ptz">
+      <span></span><button data-focus-ptz="up">▲</button><span></span>
+      <button data-focus-ptz="left">◀</button>
+      <button data-focus-ptz="stop">■</button>
+      <button data-focus-ptz="right">▶</button>
+      <span></span><button data-focus-ptz="down">▼</button><span></span>
+    </div>
+  </div>
+</div>
+
+<div id="user-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h3 id="user-modal-title">Tambah user</h3>
+    <div class="field">
+      <label>Username</label>
+      <input id="user-username" type="text" placeholder="mis. operator1" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label id="user-password-label">Password</label>
+      <input id="user-password" type="password" autocomplete="new-password" />
+    </div>
+    <div class="field">
+      <label>Role</label>
+      <select id="user-role">
+        <option value="viewer">Viewer</option>
+        <option value="operator">Operator</option>
+        <option value="admin">Admin</option>
+      </select>
+    </div>
+    <div class="form-msg" id="user-form-msg"></div>
+    <div class="modal-actions">
+      <button class="btn secondary" id="user-cancel-btn">Batal</button>
+      <button class="btn" id="user-save-btn">Simpan user</button>
+    </div>
+  </div>
+</div>
+
+<div id="location-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h3 id="location-modal-title">Tambah lokasi</h3>
+    <div class="field">
+      <label>Nama lokasi</label>
+      <input id="loc-name" type="text" placeholder="Contoh: Gudang Utara" />
+    </div>
+    <div class="field">
+      <label>Alamat (opsional)</label>
+      <input id="loc-address" type="text" placeholder="Jl. Contoh No. 1, Jakarta" />
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Latitude</label>
+        <input id="loc-lat" type="number" step="any" placeholder="-6.200000" />
+      </div>
+      <div class="field">
+        <label>Longitude</label>
+        <input id="loc-lng" type="number" step="any" placeholder="106.816666" />
+      </div>
+    </div>
+    <p class="field-hint">Tips: klik langsung di peta untuk mengisi koordinat otomatis, atau tempel dari Google Maps (klik kanan titik lokasi → salin koordinat).</p>
+    <div class="form-msg" id="location-form-msg"></div>
+    <div class="modal-actions">
+      <button class="btn secondary" id="location-cancel-btn">Batal</button>
+      <button class="btn" id="location-save-btn">Simpan lokasi</button>
+    </div>
+  </div>
+</div>
+
+<div id="tile-action-menu" class="hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
