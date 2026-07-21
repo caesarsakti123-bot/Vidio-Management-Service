@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { logEvent, getCameraById } = require('./db');
@@ -6,6 +6,35 @@ const settings = require('./settings');
 
 const STREAMS_DIR = path.join(__dirname, '..', 'public', 'streams');
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+
+// The RTSP client-side socket timeout flag has flip-flopped across ffmpeg
+// releases and hardcoding either name breaks the *other* line:
+//   - ffmpeg <= ~5.x (e.g. 4.4.2, the Ubuntu 20.04/22.04 apt package):
+//     '-stimeout' (microseconds) is the client timeout. '-timeout' means
+//     something different (RTSP *listen_timeout*, server mode) — passing it
+//     here makes ffmpeg silently try to open a listening socket instead of
+//     connecting, so every single camera fails ("Unable to open RTSP for
+//     listening" / "Cannot assign requested address"), and since that
+//     message contains neither "error" nor "fail" it also slips past the
+//     lastErrorByCamera capture below.
+//   - Newer ffmpeg builds (e.g. 8.x) removed '-stimeout' entirely — passing
+//     it is a hard "Unrecognized option" parse failure instead, and
+//     '-timeout' is the correct (and only) client timeout there.
+// Rather than hardcode one and break whichever environment doesn't match
+// (this bit us going both directions already — see git history on this
+// line), ask the ffmpeg binary actually installed what it supports and
+// cache the answer once at startup.
+function detectTimeoutFlag() {
+  try {
+    const result = spawnSync(FFMPEG, ['-hide_banner', '-h', 'demuxer=rtsp'], { encoding: 'utf8' });
+    const helpText = `${result.stdout || ''}${result.stderr || ''}`;
+    if (/^\s*-stimeout\b/m.test(helpText)) return '-stimeout';
+  } catch (_err) {
+    // fall through to default below
+  }
+  return '-timeout';
+}
+const RTSP_TIMEOUT_FLAG = detectTimeoutFlag();
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 30000;
@@ -76,16 +105,12 @@ function buildArgs(camera, dir, playlistPath, encoder) {
     // stays "active" with no output and no error, instead of failing fast
     // so the reconnect-with-backoff logic below can kick in.
     //
-    // '-timeout' is the client-side socket timeout on the ffmpeg actually
-    // installed here (8.x). '-stimeout' — needed on ffmpeg 4.x, where
-    // '-timeout' instead meant the RTSP *listen_timeout* (server mode) — was
-    // removed entirely in modern ffmpeg: passing it is a hard "Unrecognized
-    // option" argument-parse failure, so every single spawn was dying before
-    // ffmpeg even tried to reach the camera and the live view never had a
-    // chance to come up (this was THE bug behind "gambar tidak muncul").
-    // If the server's ffmpeg ever gets downgraded to the 4.x line, swap
-    // this back to '-stimeout'.
-    '-timeout', '10000000', // microseconds
+    // See RTSP_TIMEOUT_FLAG above: whether this is '-stimeout' or '-timeout'
+    // depends on which ffmpeg is actually installed on this machine, detected
+    // at startup rather than hardcoded, since the two ffmpeg lines we deploy
+    // to (Ubuntu 4.4.2 vs newer 8.x builds) disagree on which name is even
+    // valid, let alone what it means.
+    RTSP_TIMEOUT_FLAG, '10000000', // microseconds
     '-i', camera.rtsp_url,
     ...encoderArgs,
     '-r', String(fps),
