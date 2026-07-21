@@ -67,18 +67,33 @@ const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 30000;
 let retryCount = 0;
 let stopRequested = false;
+// QSV is a host-level hardware capability — once it's proven unusable on
+// this PC it will fail identically on every future reconnect, so remember
+// that instead of burning ~4s retrying it each cycle.
+let qsvKnownUnavailable = false;
 
 function log(...msg) {
   console.log(`[${new Date().toISOString()}]`, ...msg);
 }
 
+const HLS_SEGMENT_SECONDS = 2;
+
 function buildFfmpegArgs(encoder) {
   const scale = `scale=w='min(${MAX_WIDTH},iw)':h=-2:flags=fast_bilinear`;
+  // See the matching comment in streaming.js's buildArgs — without pinning
+  // the GOP to the HLS segment length, the encoder's default keyframe
+  // interval (far longer than 2s) makes the first segment take many
+  // seconds to close and every segment after it an inconsistent length.
+  const gop = TARGET_FPS * HLS_SEGMENT_SECONDS;
   const encoderArgs = encoder === 'qsv'
-    ? ['-vf', `${scale},format=nv12`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '25']
-    : ['-vf', `${scale},format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '23'];
+    ? ['-vf', `${scale},format=nv12`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '25', '-g', String(gop), '-bf', '0']
+    : ['-vf', `${scale},format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '23', '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0'];
 
   return [
+    // See the matching comment in streaming.js — tolerate a glitchy WAN
+    // camera link instead of the pipeline stalling or dying on it.
+    '-fflags', '+genpts+discardcorrupt',
+    '-avoid_negative_ts', 'make_zero',
     '-rtsp_transport', 'tcp',
     '-timeout', '10000000',
     '-i', RTSP_URL,
@@ -86,9 +101,9 @@ function buildFfmpegArgs(encoder) {
     '-r', String(TARGET_FPS),
     '-an',
     '-f', 'hls',
-    '-hls_time', '2',
+    '-hls_time', String(HLS_SEGMENT_SECONDS),
     '-hls_list_size', '6',
-    '-hls_flags', 'delete_segments+append_list',
+    '-hls_flags', 'delete_segments+append_list+independent_segments',
     '-hls_segment_filename', path.join(WORK_DIR, 'seg_%03d.ts'),
     path.join(WORK_DIR, 'index.m3u8'),
   ];
@@ -172,6 +187,7 @@ function spawnFfmpeg(encoder) {
     const ranMs = Date.now() - startedAt;
     if (encoder === 'qsv' && code !== 0 && ranMs < 4000 && !fellBack) {
       fellBack = true;
+      qsvKnownUnavailable = true;
       log('Hardware encoder (QSV) gagal, beralih ke software (libx264)...');
       spawnFfmpeg('x264');
       return;
@@ -188,7 +204,7 @@ function scheduleReconnect() {
   const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (retryCount - 1));
   log(`Mencoba sambung ulang dalam ${Math.round(delay / 1000)}s (percobaan ke-${retryCount})...`);
   setTimeout(() => {
-    if (!stopRequested) spawnFfmpeg('qsv');
+    if (!stopRequested) spawnFfmpeg(qsvKnownUnavailable ? 'x264' : 'qsv');
   }, delay);
 }
 

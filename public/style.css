@@ -79,14 +79,57 @@ select:focus-visible,
   align-items: center;
   justify-content: center;
   padding: 20px;
+  position: relative;
+  overflow: hidden;
+}
+/* Two blurred glow orbs drifting slowly behind the login box — reuses the
+   same glow colors as the app's body background so the login screen doesn't
+   look like a different, disconnected surface. */
+#login-screen::before,
+#login-screen::after {
+  content: '';
+  position: absolute;
+  width: 520px;
+  height: 520px;
+  border-radius: 50%;
+  filter: blur(90px);
+  pointer-events: none;
+  z-index: 0;
+}
+#login-screen::before {
+  top: -200px;
+  left: -180px;
+  background: var(--bg-glow-1);
+  animation: loginDriftA 22s ease-in-out infinite alternate;
+}
+#login-screen::after {
+  bottom: -220px;
+  right: -180px;
+  background: var(--bg-glow-2);
+  animation: loginDriftB 26s ease-in-out infinite alternate;
+}
+@keyframes loginDriftA {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(70px, 50px) scale(1.15); }
+}
+@keyframes loginDriftB {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(-60px, -40px) scale(1.1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #login-screen::before,
+  #login-screen::after,
+  .login-logo,
+  .login-box::before { animation: none !important; }
 }
 .login-box {
   position: relative;
+  z-index: 1;
   background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 40px 36px 32px;
-  width: 360px;
+  width: min(360px, 100%);
   box-shadow: var(--shadow-lg);
   animation: popIn 0.35s ease;
 }
@@ -96,11 +139,17 @@ select:focus-visible,
   inset: -1px;
   border-radius: var(--radius-lg);
   padding: 1px;
-  background: linear-gradient(135deg, rgba(79,140,255,0.5), rgba(124,92,255,0) 40%);
+  background: linear-gradient(135deg, rgba(79,140,255,0.6), rgba(124,92,255,0) 30%, rgba(124,92,255,0.5) 70%, rgba(79,140,255,0) 100%);
+  background-size: 250% 250%;
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
   pointer-events: none;
+  animation: loginBorderShimmer 6s ease-in-out infinite;
+}
+@keyframes loginBorderShimmer {
+  0%, 100% { background-position: 0% 0%; }
+  50% { background-position: 100% 100%; }
 }
 .login-logo {
   width: 52px;
@@ -112,6 +161,11 @@ select:focus-visible,
   justify-content: center;
   margin: 0 auto 18px;
   box-shadow: 0 8px 20px rgba(79, 140, 255, 0.35);
+  animation: loginLogoPulse 2.6s ease-in-out infinite;
+}
+@keyframes loginLogoPulse {
+  0%, 100% { box-shadow: 0 8px 20px rgba(79, 140, 255, 0.35); }
+  50% { box-shadow: 0 10px 28px rgba(124, 92, 255, 0.55); }
 }
 .login-logo svg { width: 26px; height: 26px; }
 .login-logo img { width: 100%; height: 100%; object-fit: contain; border-radius: 14px; }
@@ -246,7 +300,7 @@ select:focus-visible,
   position: absolute;
   top: 56px;
   left: 12px;
-  width: 320px;
+  width: min(320px, calc(100vw - 24px));
   max-height: 420px;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -1045,29 +1099,61 @@ select:focus-visible,
 }
 .leaflet-control-zoom a:hover { background: var(--panel-3) !important; }
 
-/* ---- Live view: tree panel + main content split ---- */
-.live-body { display: flex; gap: 18px; align-items: flex-start; }
+/* ---- Live view: main content (no reserved side column anymore) ---- */
+.live-body { display: flex; }
 .live-main { flex: 1; min-width: 0; }
 
-.location-tree-panel {
-  width: 220px;
-  flex-shrink: 0;
-  background: var(--panel);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius);
-  padding: 12px;
-  max-height: calc(100vh - 160px);
-  overflow-y: auto;
-  position: sticky;
-  top: 0;
+/* Location picker now lives in the sidebar, nested right under the "Live
+   view" nav item, instead of a column beside the camera grid — the grid
+   gets the full content width. Only shown while Live view is the active
+   page (toggled in app.js alongside the view switch). */
+.nav-live-location { padding: 2px 0 8px 4px; margin-bottom: 2px; }
+.location-dropdown-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
-.location-tree-header {
+.location-dropdown-btn:hover { border-color: #3a4150; background: var(--panel-3); }
+.location-dropdown-btn.open { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.location-dropdown-icon { flex-shrink: 0; color: var(--text-faint); }
+.location-dropdown-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.location-dropdown-chevron { flex-shrink: 0; color: var(--text-faint); transition: transform 0.15s ease; }
+.location-dropdown-btn.open .location-dropdown-chevron { transform: rotate(180deg); }
+
+/* Appended to <body>, not the sidebar — the sidebar scrolls/clips its own
+   overflow (and on mobile is a transformed off-canvas drawer, which becomes
+   the containing block for anything positioned relative to it), so this
+   panel is positioned via JS with getBoundingClientRect() from the trigger
+   button instead, same portal approach as #tile-action-menu. */
+#location-tree-panel {
+  position: fixed;
+  z-index: 90;
+  width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px;
+  max-height: min(480px, 70vh);
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+}
+.location-tree-panel-header {
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-faint);
-  padding: 4px 8px 10px;
+  padding: 6px 8px 8px;
 }
 .tree-row {
   display: flex;
@@ -1087,13 +1173,19 @@ select:focus-visible,
   border: none;
   color: var(--text-faint);
   cursor: pointer;
-  font-size: 10px;
   width: 14px;
+  height: 14px;
   flex-shrink: 0;
   padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
+.tree-toggle svg { width: 11px; height: 11px; transition: transform 0.15s ease; }
+.tree-toggle.expanded svg { transform: rotate(90deg); }
 .tree-toggle-spacer { width: 14px; flex-shrink: 0; }
-.tree-icon { font-size: 13px; flex-shrink: 0; }
+.tree-icon { flex-shrink: 0; display: flex; align-items: center; }
+.tree-icon svg { width: 14px; height: 14px; }
 .tree-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-count {
   font-size: 10.5px;
@@ -1107,7 +1199,7 @@ select:focus-visible,
 .tree-children { margin-left: 20px; }
 .tree-children.hidden { display: none; }
 .tree-row-bldg { font-size: 12.5px; }
-.tree-row-bldg .tree-icon { font-size: 11.5px; }
+.tree-row-bldg .tree-icon svg { width: 12.5px; height: 12.5px; }
 .tree-children-2 { margin-left: 18px; }
 .tree-leaf {
   display: flex;
@@ -1131,10 +1223,6 @@ select:focus-visible,
 .tree-cam-dot.live { background: var(--live); box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18); }
 .tree-empty { font-size: 11.5px; color: var(--text-faint); padding: 4px 8px 6px; font-style: italic; }
 
-@media (max-width: 980px) {
-  .live-body { flex-direction: column; }
-  .location-tree-panel { width: 100%; max-height: 260px; position: static; }
-}
 
 /* ---- Event filters & timeline ---- */
 .event-filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
@@ -1225,9 +1313,10 @@ select:focus-visible,
   background: var(--panel);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow-x: auto;
   box-shadow: var(--shadow-sm);
 }
+.table-wrap table { min-width: 560px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--border-soft); }
 th {
@@ -1272,7 +1361,7 @@ tbody tr:last-child td { border-bottom: none; }
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 26px;
-  width: 440px;
+  width: min(440px, calc(100vw - 32px));
   max-height: 88vh;
   overflow-y: auto;
   box-shadow: var(--shadow-lg);
@@ -1438,6 +1527,7 @@ tbody tr:last-child td { border-bottom: none; }
   font-size: 12.5px;
   max-height: 220px;
   overflow-y: auto;
+  overflow-x: auto;
 }
 .import-preview table, .import-results table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .import-preview th, .import-preview td, .import-results th, .import-results td {
@@ -1468,13 +1558,117 @@ tbody tr:last-child td { border-bottom: none; }
 }
 
 /* ---- Responsive ---- */
+html, body { overflow-x: hidden; } /* belt-and-suspenders: nothing should be able to push the page sideways */
+
+/* Hamburger button (injected by app.js into every .main-header) and the
+   drawer's own close button only make sense once the sidebar becomes an
+   off-canvas drawer below — hidden here, switched on inside the breakpoint. */
+.mobile-menu-btn, .drawer-close-btn { display: none; }
+.main-header-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 6, 9, 0.6);
+  z-index: 75;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.drawer-backdrop.visible { opacity: 1; pointer-events: auto; }
+
 @media (max-width: 860px) {
   #app { flex-direction: column; }
-  .sidebar { width: 100%; flex-direction: row; align-items: center; padding: 12px 16px; overflow-x: auto; }
-  .brand { margin-bottom: 0; margin-right: 12px; }
+
+  /* Sidebar becomes an off-canvas drawer instead of a horizontal icon bar —
+     the icon-only strip was cramped and hid the nav labels entirely; a
+     full-height slide-in panel keeps the normal, readable desktop layout
+     and just tucks it off-screen until the hamburger button opens it. */
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(280px, 84vw);
+    flex-direction: column;
+    align-items: stretch;
+    padding: 20px 16px;
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    z-index: 80;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.drawer-open { transform: translateX(0); }
+  .drawer-close-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .drawer-close-btn:hover { background: var(--panel-3); color: var(--text); }
   .nav-item.active::before { display: none; }
-  .sidebar-footer { margin-top: 0; margin-left: auto; border-top: none; padding-top: 0; display: flex; align-items: center; gap: 10px; }
-  .sidebar-footer #whoami { margin-bottom: 0; white-space: nowrap; }
-  .sidebar-footer .btn { width: auto; }
+  .sidebar-footer { margin-top: auto; margin-left: 0; border-top: 1px solid var(--border-soft); padding-top: 16px; display: block; }
+  .sidebar-footer #whoami { margin-bottom: 12px; white-space: normal; }
+  .sidebar-footer .btn { width: 100%; }
+
   .main { padding: 18px 16px 32px; }
+  .mobile-menu-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: var(--radius-sm);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .mobile-menu-btn:hover { border-color: var(--accent); }
+  .mobile-menu-btn svg { width: 18px; height: 18px; }
+}
+
+/* ---- Phone-width fixes ----
+   Below this several components that are fine as fixed grids/rows on a
+   tablet start actively breaking: forced multi-column camera layouts turn
+   into unusably tiny tiles, and side-by-side form fields get cramped. */
+@media (max-width: 640px) {
+  .main-header { flex-wrap: wrap; gap: 10px; }
+  .main-header h2 { font-size: 18px; }
+
+  .grid,
+  .grid.layout-1x1,
+  .grid.layout-2x2,
+  .grid.layout-3x3,
+  .grid.layout-4x4 { grid-template-columns: 1fr; }
+
+  .grid.layout-spotlight { flex-direction: column; }
+  .spotlight-sidebar { max-width: none; flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
+  .spotlight-sidebar .tile,
+  .spotlight-sidebar .tile-empty { min-width: 220px; flex-shrink: 0; }
+
+  .camera-search { min-width: 0; }
+  .layout-toolbar { gap: 10px; }
+
+  .stat-grid { grid-template-columns: 1fr; }
+  .dashboard-panel { padding: 16px; }
+
+  .settings-grid { grid-template-columns: 1fr; }
+  .settings-section { padding: 16px; }
+  .field-row,
+  .location-field-row { flex-direction: column; align-items: stretch; }
+
+  .modal { padding: 20px; }
+  .player-modal-header { flex-wrap: wrap; }
+
+  .sub-tabs { overflow-x: auto; }
+  .sub-tab { padding: 10px 12px; white-space: nowrap; }
+
+  .table-wrap table { min-width: 480px; }
 }

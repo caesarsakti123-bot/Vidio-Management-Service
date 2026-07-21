@@ -1,7 +1,7 @@
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { db, logEvent } = require('./db');
+const { db, logEvent, getCameraById } = require('./db');
 const settings = require('./settings');
 
 const RECORDINGS_DIR = path.join(__dirname, '..', 'recordings');
@@ -9,7 +9,32 @@ const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || deriveFfprobePath(FFMPEG);
 const SEGMENT_SECONDS = 600; // 10 minutes per file
 
-const activeRecorders = new Map(); // cameraId -> { process, starting }
+const RECONNECT_BASE_MS = 2000;
+const RECONNECT_MAX_MS = 30000;
+const STABLE_AFTER_MS = 10000;
+
+// cameraId -> { process, starting, stopRequested, retryCount, reconnectTimer, stableTimer, encoder }
+const activeRecorders = new Map();
+// QSV is a host-level hardware capability — once proven unusable here it
+// will fail identically for every camera/reconnect, so don't retry it.
+let qsvKnownUnavailable = false;
+
+// See the matching function in streaming.js — recording must never give up
+// retrying on its own (a silent recording gap is worse than a live-view
+// gap), but logging every single attempt for a camera down for days is what
+// flooded the events table before. Taper off the log instead of the retry.
+function shouldLogRetry(retryCount) {
+  if (retryCount <= 5) return true;
+  if (retryCount <= 20) return retryCount % 5 === 0;
+  return retryCount % 20 === 0;
+}
+
+// See the matching function in streaming.js — spreads out retries so
+// several cameras disrupted by the same event don't all reconnect in
+// lockstep and re-collide on the same resource every cycle.
+function withJitter(delayMs) {
+  return Math.round(delayMs * (0.8 + Math.random() * 0.4));
+}
 
 function deriveFfprobePath(ffmpegPath) {
   if (/ffmpeg(\.exe)?$/i.test(ffmpegPath)) {
@@ -74,33 +99,67 @@ function spawnRecorder(camera, entry, pattern, encoder) {
   const proc = spawn(FFMPEG, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
   entry.process = proc;
   entry.starting = false;
+  entry.encoder = encoder;
   const startedAt = Date.now();
   let fellBack = false;
 
+  if (entry.stableTimer) clearTimeout(entry.stableTimer);
+  entry.stableTimer = setTimeout(() => {
+    entry.retryCount = 0;
+  }, STABLE_AFTER_MS);
+
   proc.on('error', (err) => {
+    if (entry.stableTimer) clearTimeout(entry.stableTimer);
     activeRecorders.delete(camera.id);
     logEvent(camera.id, 'recording_error', `Gagal menjalankan ffmpeg: ${err.message}`);
   });
 
   proc.on('exit', (code) => {
+    if (entry.stableTimer) clearTimeout(entry.stableTimer);
     const ranMs = Date.now() - startedAt;
+
     if (encoder === 'qsv' && code !== 0 && ranMs < 4000 && !fellBack) {
       fellBack = true;
+      qsvKnownUnavailable = true;
       logEvent(camera.id, 'recording_error', 'Hardware encoder (QSV) gagal, beralih ke software (libx264) untuk rekaman');
       spawnRecorder(camera, entry, pattern, 'x264');
       return;
     }
-    activeRecorders.delete(camera.id);
-    logEvent(camera.id, 'recording_stopped', `Recorder exited with code ${code}`);
-  });
 
-  logEvent(camera.id, 'recording_started', `Perekaman berkelanjutan dimulai (${encoder})`);
+    if (entry.stopRequested) {
+      activeRecorders.delete(camera.id);
+      logEvent(camera.id, 'recording_stopped', `Recorder exited with code ${code}`);
+      return;
+    }
+
+    // Unexpected disconnect (network blip, camera reboot, RTSP timeout) —
+    // retry with backoff instead of leaving recording dead until someone
+    // notices and restarts it by hand. Never give up on its own: a
+    // recording that silently stopped is far worse than one that took a
+    // while to reconnect.
+    entry.retryCount = (entry.retryCount || 0) + 1;
+
+    const delay = withJitter(Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (entry.retryCount - 1)));
+    if (shouldLogRetry(entry.retryCount)) {
+      logEvent(camera.id, 'recording_reconnecting', `Rekaman terputus, mencoba sambung ulang dalam ${Math.round(delay / 1000)}s (percobaan ke-${entry.retryCount})`);
+    }
+    entry.reconnectTimer = setTimeout(() => {
+      if (!activeRecorders.has(camera.id) || entry.stopRequested) return;
+      // Re-fetch so credentials/RTSP path edited mid-outage take effect,
+      // same reasoning as streaming.js.
+      const fresh = getCameraById(camera.id) || camera;
+      // codec (copy vs transcode) doesn't change camera-side between
+      // reconnects, so keep using the encoder already settled on above
+      // instead of re-probing.
+      spawnRecorder(fresh, entry, pattern, entry.encoder === 'qsv' && qsvKnownUnavailable ? 'x264' : entry.encoder);
+    }, delay);
+  });
 }
 
 async function startRecording(camera) {
   if (activeRecorders.has(camera.id)) return false;
 
-  const entry = { process: null, starting: true };
+  const entry = { process: null, starting: true, stopRequested: false, retryCount: 0, reconnectTimer: null, stableTimer: null, encoder: null };
   activeRecorders.set(camera.id, entry);
 
   const dir = camDir(camera.id);
@@ -123,18 +182,25 @@ async function startRecording(camera) {
   // h264 sources are archived as-is (no re-encode cost); anything else
   // (hevc, mjpeg, unknown probe failure, ...) is transcoded to h264 so
   // recordings are always playable in-browser, not just downloadable.
-  const encoder = codec === 'h264' ? 'copy' : (settings.getSetting('hwaccel_mode') === 'software' ? 'x264' : 'qsv');
+  const encoder = codec === 'h264' ? 'copy' : ((settings.getSetting('hwaccel_mode') === 'software' || qsvKnownUnavailable) ? 'x264' : 'qsv');
   spawnRecorder(camera, entry, pattern, encoder);
+  logEvent(camera.id, 'recording_started', `Perekaman berkelanjutan dimulai (${encoder})`);
   return true;
 }
 
 function stopRecording(cameraId) {
   const entry = activeRecorders.get(cameraId);
   if (!entry) return false;
+  entry.stopRequested = true;
+  if (entry.reconnectTimer) {
+    clearTimeout(entry.reconnectTimer);
+    entry.reconnectTimer = null;
+  }
+  if (entry.stableTimer) clearTimeout(entry.stableTimer);
   if (entry.process) {
     entry.process.kill('SIGTERM');
   } else {
-    activeRecorders.delete(cameraId); // still probing codec, nothing spawned yet
+    activeRecorders.delete(cameraId); // still probing codec, or mid-backoff wait with no live process
   }
   return true;
 }
@@ -188,6 +254,9 @@ function startCleanupScheduler() {
 
 function stopAll() {
   for (const [, entry] of activeRecorders) {
+    entry.stopRequested = true;
+    if (entry.reconnectTimer) clearTimeout(entry.reconnectTimer);
+    if (entry.stableTimer) clearTimeout(entry.stableTimer);
     if (entry.process) entry.process.kill('SIGTERM');
   }
   activeRecorders.clear();

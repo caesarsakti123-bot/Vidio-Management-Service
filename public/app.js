@@ -234,7 +234,47 @@ document.querySelectorAll('.nav-item').forEach((item) => {
     if (item.dataset.view === 'users') loadUsers();
     if (item.dataset.view === 'map') showMapView();
     if (item.dataset.view === 'settings') loadSettingsPage();
+    $('#nav-live-location')?.classList.toggle('hidden', item.dataset.view !== 'live');
+    closeLocationDropdown(); // irrelevant/stale once we've left (or re-entered) Live view
+    closeDrawer(); // no-op on desktop; on mobile the sidebar is an off-canvas drawer
   });
+});
+
+// ---- Mobile off-canvas drawer ----
+// On phones the sidebar (built above as a normal vertical nav) is tucked
+// off-screen via CSS and slid in on demand, rather than duplicating the nav
+// markup in a second mobile-only menu.
+
+function openDrawer() {
+  $('#sidebar')?.classList.add('drawer-open');
+  $('#drawer-backdrop')?.classList.add('visible');
+}
+function closeDrawer() {
+  $('#sidebar')?.classList.remove('drawer-open');
+  $('#drawer-backdrop')?.classList.remove('visible');
+}
+$('#drawer-backdrop')?.addEventListener('click', closeDrawer);
+$('#drawer-close-btn')?.addEventListener('click', closeDrawer);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+window.addEventListener('resize', () => { if (window.innerWidth > 860) closeDrawer(); });
+
+// Every page header gets its own hamburger button (rather than one global
+// bar) so it sits inline with that page's title, matching the single-row
+// "☰ Title    [action]" pattern instead of stacking a separate bar above it.
+document.querySelectorAll('.main-header').forEach((header) => {
+  const h2 = header.querySelector('h2');
+  if (!h2) return;
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'main-header-title';
+  const menuBtn = document.createElement('button');
+  menuBtn.type = 'button';
+  menuBtn.className = 'mobile-menu-btn';
+  menuBtn.setAttribute('aria-label', 'Buka menu');
+  menuBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>';
+  menuBtn.addEventListener('click', openDrawer);
+  header.insertBefore(titleWrap, h2);
+  titleWrap.appendChild(menuBtn);
+  titleWrap.appendChild(h2);
 });
 
 // ---- Camera grid ----
@@ -479,6 +519,28 @@ function renderGrid() {
   const grid = $('#camera-grid');
   const playingIds = [...state.players.keys()];
   hideTileActionMenu(); // tiles/buttons below are about to be torn down and rebuilt
+
+  // The grid gets rebuilt from scratch below on every call — after
+  // starting/stopping any single stream, on the 15s status poll, on layout
+  // or filter changes, on reorder — which would otherwise destroy the
+  // <video> element a running hls.js player is attached to. That forced
+  // every already-playing tile to fully reinitialize (new manifest fetch,
+  // fresh buffer) any time it happened, which looks exactly like the
+  // stream reconnecting even though the ffmpeg process behind it never
+  // stopped (e.g. clicking "Live" on one camera made every other
+  // already-stable tile flicker/reconnect too). Detach and hang onto the
+  // live <video> nodes before the rebuild, then splice them back into
+  // their tile's fresh placeholder afterwards instead of recreating
+  // playback. This only works because the detach (grid.innerHTML = '')
+  // and the re-insertion both happen synchronously within this same
+  // function, with no `await`/timeout between them for the browser to
+  // treat the node as gone.
+  const liveVideoNodes = new Map();
+  for (const id of playingIds) {
+    const el = document.getElementById(`video-${id}`);
+    if (el) liveVideoNodes.set(id, el);
+  }
+
   grid.innerHTML = '';
   grid.className = `grid layout-${state.layout}`;
 
@@ -563,28 +625,33 @@ function renderGrid() {
     });
   });
 
-  // The tiles above were just rebuilt from scratch, which replaced any <video>
-  // elements a running hls.js player was attached to. Re-attach playback for
-  // cameras whose stream is still active so it survives grid re-renders
-  // (triggered right after starting a stream, on every poll interval, and on
-  // layout/page switches) — and also pick up streams that are active
-  // server-side but weren't started from this browser tab (e.g. still
-  // running from before a page reload, or started by another operator), so
-  // their tile shows live video instead of sitting blank even though the
-  // status badge says active.
+  // Restore playback for cameras whose stream is still active — reusing the
+  // preserved live <video> node (no reconnect, no re-buffer) where one
+  // exists, and only falling back to a fresh startPlayer() for tiles that
+  // genuinely have no player running yet: streams active server-side but
+  // never started from this browser tab (e.g. still running from before a
+  // page reload, or started by another operator), so their tile shows live
+  // video instead of sitting blank even though the status badge says active.
   const activeIds = new Set(playingIds);
   for (const cam of camerasToShow) {
     if (cam.stream.active) activeIds.add(cam.id);
   }
   for (const id of activeIds) {
     const cam = state.cameras.find((c) => c.id === id);
-    const videoExists = !!document.getElementById(`video-${id}`);
-    if (cam && cam.stream.active && videoExists) {
-      startPlayer(id, `/streams/${id}/index.m3u8`);
-    } else {
+    const placeholderVideo = document.getElementById(`video-${id}`);
+    if (!cam || !cam.stream.active || !placeholderVideo) {
       const hls = state.players.get(id);
       if (hls) hls.destroy();
       state.players.delete(id);
+      continue;
+    }
+
+    const liveVideo = liveVideoNodes.get(id);
+    if (liveVideo && state.players.has(id)) {
+      placeholderVideo.replaceWith(liveVideo);
+      document.getElementById(`placeholder-${id}`)?.classList.add('hidden');
+    } else {
+      startPlayer(id, `/streams/${id}/index.m3u8`);
     }
   }
 }
@@ -689,6 +756,31 @@ async function sendPtz(id, direction) {
   }
 }
 
+// A fatal hls.js error doesn't always mean the stream is actually dead — a
+// single dropped segment or a decode hiccup is fatal-flagged too, and hls.js
+// has cheap in-place recovery for exactly those (recoverMediaError,
+// startLoad) that avoid tearing down the player and re-fetching the whole
+// manifest. Only escalate to the caller's hard-restart path if the same
+// error class keeps recurring, which means recovery isn't actually working.
+function createHlsErrorHandler(hls, onGiveUp) {
+  let mediaErrorCount = 0;
+  let networkErrorCount = 0;
+  return (_evt, data) => {
+    if (!data.fatal) return;
+    if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorCount < 3) {
+      mediaErrorCount += 1;
+      hls.recoverMediaError();
+      return;
+    }
+    if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkErrorCount < 3) {
+      networkErrorCount += 1;
+      hls.startLoad();
+      return;
+    }
+    onGiveUp();
+  };
+}
+
 function startPlayer(id, playlistUrl) {
   const video = $(`#video-${id}`);
   if (!video) return;
@@ -698,8 +790,7 @@ function startPlayer(id, playlistUrl) {
     const hls = new Hls();
     hls.loadSource(playlistUrl);
     hls.attachMedia(video);
-    hls.on(Hls.Events.ERROR, (_evt, data) => {
-      if (!data.fatal) return;
+    hls.on(Hls.Events.ERROR, createHlsErrorHandler(hls, () => {
       stopPlayer(id);
       const placeholder = $(`#placeholder-${id}`);
       if (!placeholder) return;
@@ -709,7 +800,7 @@ function startPlayer(id, playlistUrl) {
         const cam = state.cameras.find((c) => c.id === id);
         if (cam?.stream?.active && $(`#video-${id}`)) startPlayer(id, playlistUrl);
       }, 3000);
-    });
+    }));
     video.play().catch(() => {});
     state.players.set(id, hls);
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -777,8 +868,7 @@ function renderFocusModal(cam) {
         focusHls = new Hls();
         focusHls.loadSource(`/streams/${cam.id}/index.m3u8`);
         focusHls.attachMedia(video);
-        focusHls.on(Hls.Events.ERROR, (_evt, data) => {
-          if (!data.fatal) return;
+        focusHls.on(Hls.Events.ERROR, createHlsErrorHandler(focusHls, () => {
           focusHls?.destroy();
           focusHls = null;
           if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
@@ -789,7 +879,7 @@ function renderFocusModal(cam) {
             const latestCam = state.cameras.find((c) => c.id === cam.id);
             if (latestCam) renderFocusModal(latestCam);
           }, 3000);
-        });
+        }));
         video.play().catch(() => {});
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = `/streams/${cam.id}/index.m3u8`;
@@ -857,18 +947,33 @@ $('#focus-ptz')?.querySelectorAll('[data-focus-ptz]').forEach((btn) => {
 
 // ---- Start all / stop all live streams ----
 
+// Firing stream/start for every camera back-to-back opens dozens/hundreds
+// of new outbound RTSP TCP connections and ffmpeg processes within
+// milliseconds of each other — enough of a CPU/network burst that already
+// -connected cameras can transiently miss their own connect deadline and
+// briefly reconnect too (reproduced directly: even a single new stream
+// starting can knock an already-stable one into a few seconds of
+// reconnecting). Spacing the starts out lets each connection actually
+// establish before the next one piles on.
+const STREAM_START_ALL_STAGGER_MS = 400;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 $('#stream-start-all-btn')?.addEventListener('click', async () => {
   const btn = $('#stream-start-all-btn');
   const targets = state.cameras.filter((c) => c.rtsp_url && !c.stream.active);
   if (targets.length === 0) return;
   btn.disabled = true;
   try {
-    for (const cam of targets) {
+    for (let i = 0; i < targets.length; i++) {
+      const cam = targets[i];
       try {
         await api(`/cameras/${cam.id}/stream/start`, { method: 'POST' });
       } catch (e) {
         console.error(`Gagal menyalakan live "${cam.name}":`, e.message);
       }
+      if (i < targets.length - 1) await sleep(STREAM_START_ALL_STAGGER_MS);
     }
     await loadCameras();
   } finally {
@@ -1331,14 +1436,73 @@ function renderLeaf(cam) {
   `;
 }
 
+// Line icons matching the rest of the app's sidebar/button icon language —
+// stroke="currentColor" so each one inherits whatever color its row already
+// has (muted by default, accent when active) instead of a fixed emoji tint.
+const ICON_CAMERA = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l4.55-2.28A1 1 0 0 1 21 8.62v6.76a1 1 0 0 1-1.45.9L15 14"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg>';
+const ICON_FOLDER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>';
+const ICON_BUILDING = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M9 8h.01M14 8h.01M9 12h.01M14 12h.01M9 16h.01M14 16h.01"/></svg>';
+const ICON_CHEVRON_RIGHT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
+
+function closeLocationDropdown() {
+  $('#location-dropdown-btn')?.classList.remove('open');
+  $('#location-tree-panel')?.classList.add('hidden');
+}
+function toggleLocationDropdown() {
+  const btn = $('#location-dropdown-btn');
+  const panel = $('#location-tree-panel');
+  if (!btn || !panel) return;
+  const opening = panel.classList.contains('hidden');
+  if (!opening) { closeLocationDropdown(); return; }
+
+  btn.classList.add('open');
+  panel.classList.remove('hidden');
+  // Positioned via JS instead of CSS anchoring to the button: the button
+  // lives inside the sidebar, which on mobile is a transformed (slide-in)
+  // element and therefore becomes the containing block for anything
+  // absolutely/fixed-positioned inside it — its own overflow-y:auto would
+  // then clip the panel. Computing fixed coordinates from the button's own
+  // viewport rect sidesteps that entirely, same as the tile "..." menu.
+  const rect = btn.getBoundingClientRect();
+  const panelWidth = panel.offsetWidth;
+  const panelHeight = panel.offsetHeight;
+  const openUpward = window.innerHeight - rect.bottom < panelHeight + 12 && rect.top > panelHeight + 12;
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - panelWidth - 8));
+  panel.style.left = `${left}px`;
+  panel.style.top = openUpward ? `${Math.max(8, rect.top - 6 - panelHeight)}px` : `${rect.bottom + 6}px`;
+}
+$('#location-dropdown-btn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleLocationDropdown();
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#location-tree-panel') && !e.target.closest('#location-dropdown-btn')) closeLocationDropdown();
+});
+window.addEventListener('scroll', closeLocationDropdown, true);
+window.addEventListener('resize', closeLocationDropdown);
+
+function updateLocationDropdownLabel() {
+  const label = $('#location-dropdown-label');
+  if (!label) return;
+  if (!state.locationFilter) {
+    label.textContent = `Semua Kamera (${state.cameras.length})`;
+    return;
+  }
+  const loc = state.locations.find((l) => l.id === state.locationFilter);
+  label.textContent = state.buildingFilter
+    ? `${loc?.name || 'Lokasi'} • ${state.buildingFilter.building}`
+    : (loc?.name || 'Lokasi');
+}
+
 function renderLocationTree() {
   const wrap = $('#location-tree');
   if (!wrap) return;
+  updateLocationDropdownLabel();
 
   const rows = [`
     <div class="tree-row tree-root ${!state.locationFilter ? 'active' : ''}" data-tree-loc="">
       <span class="tree-toggle-spacer"></span>
-      <span class="tree-icon">🗂️</span>
+      <span class="tree-icon">${ICON_CAMERA}</span>
       <span class="tree-label">Semua Kamera</span>
       <span class="tree-count">${state.cameras.length}</span>
     </div>
@@ -1357,8 +1521,8 @@ function renderLocationTree() {
 
     rows.push(`
       <div class="tree-row ${locActive ? 'active' : ''}" data-tree-loc="${loc.id}">
-        <button class="tree-toggle" data-tree-toggle="${locKey}" title="${expanded ? 'Lipat' : 'Buka'}">${expanded ? '▾' : '▸'}</button>
-        <span class="tree-icon">📁</span>
+        <button class="tree-toggle ${expanded ? 'expanded' : ''}" data-tree-toggle="${locKey}" title="${expanded ? 'Lipat' : 'Buka'}">${ICON_CHEVRON_RIGHT}</button>
+        <span class="tree-icon">${ICON_FOLDER}</span>
         <span class="tree-label">${escapeHtml(loc.name)}</span>
         <span class="tree-count">${camsInLoc.length}</span>
       </div>
@@ -1370,8 +1534,8 @@ function renderLocationTree() {
           const bldgActive = state.buildingFilter && state.buildingFilter.locationId === loc.id && state.buildingFilter.building === bldg;
           return `
             <div class="tree-row tree-row-bldg ${bldgActive ? 'active' : ''}" data-tree-bldg-loc="${loc.id}" data-tree-bldg-name="${escapeHtml(bldg)}">
-              <button class="tree-toggle" data-tree-toggle="${bldgKey}" title="${bldgExpanded ? 'Lipat' : 'Buka'}">${bldgExpanded ? '▾' : '▸'}</button>
-              <span class="tree-icon">🏢</span>
+              <button class="tree-toggle ${bldgExpanded ? 'expanded' : ''}" data-tree-toggle="${bldgKey}" title="${bldgExpanded ? 'Lipat' : 'Buka'}">${ICON_CHEVRON_RIGHT}</button>
+              <span class="tree-icon">${ICON_BUILDING}</span>
               <span class="tree-label">${escapeHtml(bldg)}</span>
               <span class="tree-count">${bldgCams.length}</span>
             </div>
@@ -1404,6 +1568,7 @@ function renderLocationTree() {
       state.layoutPage = 0;
       renderLocationTree();
       renderGrid();
+      closeLocationDropdown();
     });
   });
   wrap.querySelectorAll('[data-tree-bldg-loc]').forEach((row) => {
@@ -1414,6 +1579,7 @@ function renderLocationTree() {
       state.layoutPage = 0;
       renderLocationTree();
       renderGrid();
+      closeLocationDropdown();
     });
   });
   wrap.querySelectorAll('[data-tree-cam]').forEach((leaf) => {
@@ -1425,6 +1591,7 @@ function renderLocationTree() {
       state.buildingFilter = cam.building ? { locationId: cam.location_id, building: cam.building } : null;
       renderLocationTree();
       renderGrid();
+      closeLocationDropdown();
       openFocusView(cam.id);
     });
   });
@@ -1898,12 +2065,14 @@ const EVENT_META = {
   stream_reconnecting: { label: 'Live stream menyambung ulang', tone: 'warn', group: 'stream' },
   recording_started: { label: 'Rekaman dimulai', tone: 'success', group: 'recording' },
   recording_stopped: { label: 'Rekaman dihentikan', tone: 'neutral', group: 'recording' },
+  recording_reconnecting: { label: 'Rekaman menyambung ulang', tone: 'warn', group: 'recording' },
   recording_purged: { label: 'Rekaman lama dihapus', tone: 'neutral', group: 'recording' },
   recording_error: { label: 'Rekaman error', tone: 'error', group: 'recording' },
   motion_detected: { label: 'Gerakan terdeteksi', tone: 'warn', group: 'motion' },
   motion_recording_started: { label: 'Rekaman motion dimulai', tone: 'warn', group: 'motion' },
   motion_detector_started: { label: 'Motion detection aktif', tone: 'info', group: 'motion' },
   motion_detector_stopped: { label: 'Motion detection nonaktif', tone: 'neutral', group: 'motion' },
+  motion_detector_reconnecting: { label: 'Motion detector menyambung ulang', tone: 'warn', group: 'motion' },
   motion_detector_error: { label: 'Motion detector error', tone: 'error', group: 'motion' },
   user_created: { label: 'User dibuat', tone: 'user', group: 'user' },
   user_updated: { label: 'User diperbarui', tone: 'user', group: 'user' },
