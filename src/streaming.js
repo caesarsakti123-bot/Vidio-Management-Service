@@ -312,6 +312,33 @@ function stopStream(cameraId) {
   return true;
 }
 
+// Force-stops the stream and resolves only once the ffmpeg process has
+// actually exited, unlike stopStream() (viewer-count based, fires SIGTERM
+// without waiting). DELETE /api/cameras/:id needs this: rm'ing the segment
+// directory right after a bare SIGTERM races the still-exiting process for
+// its open file handles (throws EBUSY/EPERM on Windows), leaving the
+// directory orphaned since the camera row is gone by the time anyone would
+// retry.
+function stopStreamAndWait(cameraId) {
+  const entry = activeStreams.get(cameraId);
+  if (!entry) return Promise.resolve();
+  entry.stopRequested = true;
+  if (entry.reconnectTimer) {
+    clearTimeout(entry.reconnectTimer);
+    entry.reconnectTimer = null;
+  }
+  if (entry.stableTimer) clearTimeout(entry.stableTimer);
+  if (!entry.alive || !entry.process) {
+    activeStreams.delete(cameraId); // not running (mid-backoff wait or already stopped)
+    logEvent(cameraId, 'stream_stopped', 'Live stream dihentikan');
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    entry.process.once('exit', () => resolve());
+    entry.process.kill('SIGTERM');
+  });
+}
+
 function getStatus(cameraId) {
   const entry = activeStreams.get(cameraId);
   return {
@@ -333,4 +360,4 @@ function stopAll() {
   activeStreams.clear();
 }
 
-module.exports = { startStream, stopStream, getStatus, stopAll, streamDirFor };
+module.exports = { startStream, stopStream, stopStreamAndWait, getStatus, stopAll, streamDirFor };

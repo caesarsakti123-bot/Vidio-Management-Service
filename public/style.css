@@ -5,8 +5,10 @@
   --panel: #12151b;
   --panel-2: #1a1e26;
   --panel-3: #212630;
+  --panel-deep: #0e1116;
   --border: #262b35;
   --border-soft: #1d222b;
+  --border-hover: #3a4150;
   --text: #eef1f6;
   --text-dim: #8891a0;
   --text-faint: #7d8798;
@@ -19,6 +21,8 @@
   --rec-soft: rgba(239, 68, 68, 0.15);
   --warn: #f5a524;
   --warn-soft: rgba(245, 165, 36, 0.15);
+  --scrollbar-thumb: #2a2f3a;
+  --scrollbar-thumb-hover: #3a4150;
   --radius-sm: 8px;
   --radius: 12px;
   --radius-lg: 16px;
@@ -28,22 +32,64 @@
   font-family: 'Inter', -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
+/* Light theme — deliberately muted (soft gray-blue, not stark white) rather
+   than a straight color inversion, per the "jangan terlalu terang" request.
+   Same token names as :root above, so every rule written against var(--x)
+   picks this up automatically; nothing else needs to know a theme exists.
+   Camera video surfaces, the Leaflet map tiles, and modal/drawer dimming
+   scrims are deliberately NOT re-themed here — those stay dark in both
+   modes (matches how real VMS software keeps the video canvas black
+   regardless of chrome theme, and a light scrim over a light page still
+   needs to read as a scrim). */
+:root[data-theme="light"] {
+  --bg: #e8ebf1;
+  --bg-glow-1: rgba(59, 111, 224, 0.10);
+  --bg-glow-2: rgba(107, 79, 224, 0.08);
+  --panel: #f6f7fa;
+  --panel-2: #eef1f5;
+  --panel-3: #e4e8ef;
+  --panel-deep: #dde2ea;
+  --border: #d5dae2;
+  --border-soft: #e0e4ea;
+  --border-hover: #b7c0cc;
+  --text: #1c2430;
+  --text-dim: #5b6472;
+  /* Measured against every real spot these tones actually render on (badges,
+     table rows, tinted soft backgrounds) — not just the lightest --panel —
+     since translucent badge backgrounds (*-soft, ~10-12% alpha) barely
+     lighten anything and several land on --panel-2/-3 instead. The original
+     values passed against --panel alone but dropped to ~4.1-4.3:1 in those
+     real contexts, under WCAG AA's 4.5:1; these carry real margin (~5.5-6.5:1
+     against --panel) so they hold up everywhere they're actually used. */
+  --text-faint: #5a6270;
+  --accent: #2d58ba;
+  --accent-2: #5d3fc9;
+  --accent-soft: rgba(59, 111, 224, 0.12);
+  --live: #0c6631;
+  --live-soft: rgba(21, 146, 73, 0.12);
+  --rec: #b52a23;
+  --rec-soft: rgba(208, 52, 44, 0.10);
+  --warn: #7f4d00;
+  --warn-soft: rgba(193, 118, 0, 0.12);
+  --scrollbar-thumb: #c7ccd6;
+  --scrollbar-thumb-hover: #aab1bd;
+  --shadow-sm: 0 2px 8px rgba(30, 41, 59, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --shadow-md: 0 8px 24px rgba(30, 41, 59, 0.10);
+  --shadow-lg: 0 20px 48px rgba(30, 41, 59, 0.16);
+}
+
 * { box-sizing: border-box; }
 
-html { scrollbar-color: #333a47 transparent; }
+html { scrollbar-color: var(--scrollbar-thumb) transparent; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #2a2f3a; border-radius: 20px; border: 2px solid var(--bg); }
-::-webkit-scrollbar-thumb:hover { background: #3a4150; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 20px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 body {
   margin: 0;
-  background:
-    radial-gradient(760px 420px at 8% -8%, var(--bg-glow-1), transparent 60%),
-    radial-gradient(680px 420px at 100% 0%, var(--bg-glow-2), transparent 55%),
-    var(--bg);
-  background-attachment: fixed;
+  background: var(--bg);
   color: var(--text);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
@@ -242,15 +288,63 @@ select:focus-visible,
 #app {
   display: flex;
   min-height: 100vh;
+  position: relative;
+}
+/* Same drifting blurred-orb technique as the login screen (loginDriftA/B),
+   scoped to #app instead of body so login keeps its own independent effect
+   and this one only runs while the app shell is actually visible. Fixed
+   positioning + transform-only animation keeps this to two GPU-composited
+   layers regardless of how many camera tiles are on screen underneath. */
+#app::before,
+#app::after {
+  content: '';
+  position: fixed;
+  width: 680px;
+  height: 680px;
+  border-radius: 50%;
+  filter: blur(110px);
+  pointer-events: none;
+  z-index: 0;
+}
+/* Anchored clear of the 240px sidebar on purpose (unlike login's corner
+   orbs) — an opaque sidebar plus content-dense panels would otherwise hide
+   most of a top-left/bottom-right orb entirely; right/left-past-sidebar
+   placement keeps them genuinely visible in the page margins on every view,
+   not just the sparser ones. */
+#app::before {
+  top: -260px;
+  right: -140px;
+  background: var(--bg-glow-1);
+  animation: appDriftA 26s ease-in-out infinite alternate;
+}
+#app::after {
+  bottom: -260px;
+  left: 260px;
+  background: var(--bg-glow-2);
+  animation: appDriftB 30s ease-in-out infinite alternate;
+}
+@keyframes appDriftA {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(90px, 60px) scale(1.15); }
+}
+@keyframes appDriftB {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(-70px, -50px) scale(1.1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #app::before, #app::after { animation: none; }
 }
 .sidebar {
   width: 240px;
-  background: linear-gradient(180deg, var(--panel) 0%, #0e1116 100%);
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-deep) 100%);
   border-right: 1px solid var(--border-soft);
   padding: 22px 14px;
+  position: relative;
+  z-index: 1;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 .brand {
   display: flex;
@@ -297,7 +391,11 @@ select:focus-visible,
   line-height: 1;
 }
 .alert-panel {
-  position: absolute;
+  /* fixed, not absolute — .sidebar became a positioned ancestor (position:
+     relative, for the glow-orb z-index stacking) which would otherwise make
+     this resolve against the sidebar's own narrow box and get clipped by
+     its overflow-y:auto instead of floating over the whole viewport. */
+  position: fixed;
   top: 56px;
   left: 12px;
   width: min(320px, calc(100vw - 24px));
@@ -356,6 +454,14 @@ select:focus-visible,
   justify-content: center;
   flex-shrink: 0;
   box-shadow: 0 4px 12px rgba(79, 140, 255, 0.35);
+  animation: brandMarkPulse 2.6s ease-in-out infinite;
+}
+@keyframes brandMarkPulse {
+  0%, 100% { box-shadow: 0 4px 12px rgba(79, 140, 255, 0.35); }
+  50% { box-shadow: 0 6px 18px rgba(124, 92, 255, 0.55); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-mark { animation: none; }
 }
 .brand-mark svg { width: 16px; height: 16px; }
 .brand-mark img { width: 100%; height: 100%; object-fit: contain; border-radius: 9px; }
@@ -380,13 +486,14 @@ select:focus-visible,
   font-weight: 500;
   margin-bottom: 2px;
   position: relative;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
 }
-.nav-item svg { width: 17px; height: 17px; flex-shrink: 0; opacity: 0.85; }
+.nav-item svg { width: 17px; height: 17px; flex-shrink: 0; opacity: 0.85; transition: opacity 0.15s ease; }
 .nav-item.active, .nav-item:hover {
   background: var(--panel-2);
   color: var(--text);
 }
+.nav-item:hover { transform: translateX(2px); }
 .nav-item.active {
   color: #fff;
   background: linear-gradient(135deg, rgba(79,140,255,0.16), rgba(124,92,255,0.10));
@@ -401,6 +508,7 @@ select:focus-visible,
   height: 18px;
   border-radius: 3px;
   background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 10px 1px rgba(79,140,255,0.5);
 }
 .nav-item.active svg { opacity: 1; }
 .sidebar-footer {
@@ -419,6 +527,35 @@ select:focus-visible,
 }
 .sidebar-footer .btn {
   width: 100%;
+  text-decoration: none;
+  justify-content: center;
+  box-sizing: border-box;
+}
+.sidebar-footer .btn + .btn {
+  margin-top: 8px;
+}
+/* #logout-btn no longer directly follows a .btn in markup (the settings
+   menu div sits between them, hidden or not), so `.btn + .btn` above can't
+   reach it — space it explicitly instead. */
+.sidebar-footer #logout-btn {
+  margin-top: 8px;
+}
+#footer-settings-btn.open {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.footer-settings-chevron {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+#footer-settings-btn.open .footer-settings-chevron {
+  transform: rotate(180deg);
+}
+.footer-settings-menu {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
 }
 
 .main {
@@ -426,6 +563,8 @@ select:focus-visible,
   padding: 24px 32px 40px;
   overflow-y: auto;
   animation: fadeIn 0.25s ease;
+  position: relative;
+  z-index: 1;
 }
 .main-header {
   display: flex;
@@ -480,7 +619,7 @@ select:focus-visible,
   border: 1px solid var(--border);
   box-shadow: none;
 }
-.btn.secondary:hover { border-color: #3a4150; background: var(--panel-3); filter: none; }
+.btn.secondary:hover { border-color: var(--border-hover); background: var(--panel-3); filter: none; }
 .btn.danger {
   background: linear-gradient(135deg, #ef4444, #dc2626);
   color: #fff;
@@ -498,14 +637,14 @@ select:focus-visible,
   display: flex;
   align-items: center;
   gap: 14px;
-  background: var(--panel);
+  background: linear-gradient(155deg, var(--panel) 0%, var(--panel-deep) 100%);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   padding: 16px 18px;
   box-shadow: var(--shadow-sm);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
 }
-.stat-tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.stat-tile:hover { transform: translateY(-3px); box-shadow: var(--shadow-md); border-color: var(--border-hover); }
 .stat-icon {
   width: 42px;
   height: 42px;
@@ -516,7 +655,10 @@ select:focus-visible,
   flex-shrink: 0;
   background: var(--tone-soft, var(--panel-2));
   color: var(--tone-color, var(--text-dim));
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.03) inset, 0 0 18px -6px var(--tone-color, transparent);
+  transition: box-shadow 0.18s ease;
 }
+.stat-tile:hover .stat-icon { box-shadow: 0 0 0 1px rgba(255,255,255,0.03) inset, 0 0 22px -4px var(--tone-color, transparent); }
 .stat-icon svg { width: 20px; height: 20px; }
 .stat-icon.tone-info { --tone-color: var(--accent); --tone-soft: var(--accent-soft); }
 .stat-icon.tone-success { --tone-color: var(--live); --tone-soft: var(--live-soft); }
@@ -533,7 +675,18 @@ select:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 .stat-value .stat-sub { font-size: 15px; font-weight: 600; color: var(--text-faint); }
-.stat-label { font-size: 12px; color: var(--text-dim); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
 
 .dashboard-columns {
   display: grid;
@@ -545,7 +698,7 @@ select:focus-visible,
   .dashboard-columns { grid-template-columns: 1fr; }
 }
 .dashboard-panel {
-  background: var(--panel);
+  background: linear-gradient(155deg, var(--panel) 0%, var(--panel-deep) 100%);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   padding: 18px 20px;
@@ -651,7 +804,7 @@ select:focus-visible,
   background-size: 14px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.status-filter-select:hover { border-color: #3a4150; }
+.status-filter-select:hover { border-color: var(--border-hover); }
 .status-filter-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .layout-picker { display: flex; gap: 8px; flex-wrap: wrap; }
 .layout-btn {
@@ -668,7 +821,7 @@ select:focus-visible,
   transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
 .layout-btn svg { width: 18px; height: 18px; }
-.layout-btn:hover { border-color: #3a4150; color: var(--text); }
+.layout-btn:hover { border-color: var(--border-hover); color: var(--text); }
 .layout-btn.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   border-color: transparent;
@@ -784,7 +937,7 @@ select:focus-visible,
 .tile:hover {
   transform: translateY(-3px);
   box-shadow: var(--shadow-md);
-  border-color: #2f3644;
+  border-color: var(--border-hover);
 }
 .tile-video {
   position: relative;
@@ -829,9 +982,9 @@ select:focus-visible,
   border: 1px solid rgba(255,255,255,0.05);
 }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); flex-shrink: 0; }
-.status-pill.live-on .status-dot { background: var(--live); box-shadow: 0 0 8px var(--live); }
+.status-pill.live-on .status-dot { background: var(--live); box-shadow: 0 0 8px var(--live); animation: dot-breathe 2.4s ease-in-out infinite; }
 .status-pill.live-on { color: var(--live); border-color: rgba(34,197,94,0.3); }
-.status-pill.rec-on .status-dot { background: var(--rec); box-shadow: 0 0 8px var(--rec); }
+.status-pill.rec-on .status-dot { background: var(--rec); box-shadow: 0 0 8px var(--rec); animation: dot-breathe 1.8s ease-in-out infinite; }
 .status-pill.rec-on { color: var(--rec); border-color: rgba(239,68,68,0.3); }
 .status-pill.motion-on .status-dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
 .status-pill.motion-on { color: var(--warn); border-color: rgba(245,165,36,0.3); }
@@ -840,6 +993,19 @@ select:focus-visible,
 @keyframes pulse-dot {
   0%, 100% { box-shadow: 0 0 4px var(--warn); opacity: 1; }
   50% { box-shadow: 0 0 10px var(--warn); opacity: 0.5; }
+}
+/* Slow "breathing" on live/recording dots — a quiet way to signal an active
+   feed at a glance across a wall of up to 199 tiles. Animates opacity only
+   (compositor-only, no repaint/blur recalculation per frame) rather than the
+   box-shadow radius itself, since this can run on hundreds of tiles at once
+   on an unattended monitoring-wall machine — see the QSV concurrency limits
+   and reconnect jitter elsewhere in this app for why that headroom matters. */
+@keyframes dot-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-pill.live-on .status-dot, .status-pill.rec-on .status-dot { animation: none; }
 }
 .promote-btn {
   position: absolute;
@@ -870,6 +1036,21 @@ select:focus-visible,
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+}
+/* min-width:0 overrides the flex-item default (min-width:auto), which
+   otherwise refuses to shrink below the text's intrinsic width — without it,
+   overflow/ellipsis below is silently ignored and the tile just widens or
+   wraps instead, which is exactly what happened in narrow multi-column grid
+   layouts (2x2/3x3 on a ~600-750px viewport): "Motion: OFF · Sensitivitas:
+   0.04" broke across two lines instead of truncating cleanly. */
+.tile-info-text { min-width: 0; flex: 1; }
+.tile-info .name,
+.tile-info .brand,
+.tile-info .location-tag,
+.tile-info .meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tile-info .name { font-size: 13.5px; font-weight: 600; margin-bottom: 2px; }
 .tile-info .brand { font-size: 11.5px; color: var(--text-dim); }
@@ -1068,8 +1249,48 @@ select:focus-visible,
 .leaflet-popup-content { margin: 12px 14px; font-family: inherit; }
 .map-popup-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
 .map-popup-address { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
-.map-popup-count { font-size: 11.5px; color: var(--text-faint); margin-bottom: 10px; }
+.map-popup-count { margin-bottom: 8px; }
+.map-popup-cameras {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+.map-popup-cam-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 2px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.12s ease;
+}
+.map-popup-cam-row:hover { background: var(--panel-3); }
+.map-popup-cam-row .status-dot.online { background: var(--live); box-shadow: 0 0 6px var(--live); }
+.map-popup-cam-name {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.map-popup-cam-row:hover .map-popup-cam-name { color: var(--text); }
+.map-popup-empty { font-size: 11.5px; color: var(--text-faint); margin-bottom: 10px; }
 .map-popup-actions { display: flex; gap: 6px; }
+.map-marker-icon { background: transparent; border: none; }
+.map-marker-dot {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 3px solid #12151b;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+.map-marker-dot.tone-success { background: var(--live); box-shadow: 0 2px 6px rgba(0,0,0,0.5), 0 0 10px var(--live); }
+.map-marker-dot.tone-warn { background: var(--warn); box-shadow: 0 2px 6px rgba(0,0,0,0.5), 0 0 10px var(--warn); }
+.map-marker-dot.tone-error { background: var(--rec); box-shadow: 0 2px 6px rgba(0,0,0,0.5), 0 0 10px var(--rec); }
+.map-marker-dot.tone-neutral { background: var(--text-faint); }
 .map-popup-actions button {
   font-size: 11.5px;
   font-weight: 600;
@@ -1123,7 +1344,7 @@ select:focus-visible,
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
-.location-dropdown-btn:hover { border-color: #3a4150; background: var(--panel-3); }
+.location-dropdown-btn:hover { border-color: var(--border-hover); background: var(--panel-3); }
 .location-dropdown-btn.open { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .location-dropdown-icon { flex-shrink: 0; color: var(--text-faint); }
 .location-dropdown-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
@@ -1238,7 +1459,7 @@ select:focus-visible,
   cursor: pointer;
   transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
-.chip:hover { border-color: #3a4150; color: var(--text); }
+.chip:hover { border-color: var(--border-hover); color: var(--text); }
 .chip.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   border-color: transparent;
@@ -1310,7 +1531,7 @@ select:focus-visible,
 
 /* ---- Table (recordings/events/users) ---- */
 .table-wrap {
-  background: var(--panel);
+  background: linear-gradient(155deg, var(--panel) 0%, var(--panel-deep) 100%);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   overflow-x: auto;
@@ -1347,6 +1568,92 @@ tbody tr:last-child td { border-bottom: none; }
 .row-actions button.danger { color: var(--rec); border-color: rgba(239,68,68,0.3); }
 .row-actions button.danger:hover { border-color: var(--rec); background: var(--rec-soft); }
 
+/* ---- SOP Aplikasi ---- */
+.sop-view { max-width: 880px; }
+.sop-intro { color: var(--text-dim); font-size: 14px; max-width: 68ch; margin: 0 0 20px; }
+.sop-quicknav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
+.sop-quicknav a {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-decoration: none;
+  padding: 6px 11px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.sop-quicknav a:hover { border-color: var(--accent); color: var(--text); }
+.sop-section { margin-bottom: 16px; scroll-margin-top: 16px; }
+.sop-section h3 { margin: 0 0 12px; }
+.sop-section h4 { font-size: 12.5px; font-weight: 700; margin: 16px 0 6px; color: var(--text); }
+.sop-section p { max-width: 68ch; margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: var(--text); }
+.sop-section p.dim { color: var(--text-dim); }
+.sop-section p:last-child { margin-bottom: 0; }
+.sop-section ul, .sop-section ol { max-width: 68ch; margin: 0 0 10px; padding-left: 20px; font-size: 13.5px; line-height: 1.6; }
+.sop-section li { margin-bottom: 5px; color: var(--text); }
+.sop-section .table-wrap { margin: 12px 0; }
+/* Specificity note: .dashboard-panel > div forces flex-direction:column on
+   every direct <div> child (for the dashboard's own stacked panels) — these
+   badges need a row instead, so this selector has to out-specificity it. */
+.dashboard-panel.sop-section > .sop-roles {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.role-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.role-badge.admin { color: var(--rec); background: var(--rec-soft); border-color: rgba(239,68,68,0.3); }
+.role-badge.operator { color: var(--accent); background: var(--accent-soft); border-color: rgba(79,140,255,0.3); }
+.role-badge.viewer { color: var(--text-dim); background: var(--panel-3); border-color: var(--border); }
+.role-badge.all { color: var(--live); background: var(--live-soft); border-color: rgba(34,197,94,0.3); }
+.sop-callout {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 10px 14px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.sop-callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.sop-callout b { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); margin-bottom: 3px; }
+.sop-callout p { margin: 0 !important; }
+.sop-ts-item + .sop-ts-item { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-soft); }
+.sop-ts-symptom { font-weight: 700; font-size: 13.5px; color: var(--text); margin-bottom: 4px; }
+.sop-ts-row { display: flex; gap: 8px; margin-top: 6px; font-size: 13px; }
+.sop-ts-row .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); min-width: 68px; padding-top: 2px; flex-shrink: 0; }
+.sop-ts-row .v { color: var(--text); max-width: 58ch; }
+.sop-code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+pre.sop-code-block {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  color: var(--text-dim);
+  margin: 10px 0;
+}
+
 /* ---- Modal ---- */
 .modal-overlay {
   position: fixed; inset: 0;
@@ -1367,6 +1674,63 @@ tbody tr:last-child td { border-bottom: none; }
   box-shadow: var(--shadow-lg);
   animation: popIn 0.2s ease;
 }
+.confirm-modal { width: min(400px, calc(100vw - 32px)); }
+.confirm-modal p {
+  margin: 0 0 4px;
+  font-size: 13.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+/* ---- Toast notifications (replaces alert()) ---- */
+#toast-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(360px, calc(100vw - 40px));
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: linear-gradient(155deg, var(--panel) 0%, var(--panel-deep) 100%);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tone-color, var(--text-faint));
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateX(16px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: auto;
+}
+.toast.show { opacity: 1; transform: translateX(0); }
+.toast.error { --tone-color: var(--rec); }
+.toast.success { --tone-color: var(--live); }
+.toast.info { --tone-color: var(--accent); }
+.toast-icon { color: var(--tone-color, var(--text-faint)); flex-shrink: 0; margin-top: 1px; }
+.toast-icon svg { width: 16px; height: 16px; }
+.toast-message { font-size: 13px; color: var(--text); line-height: 1.5; flex: 1; min-width: 0; word-break: break-word; }
+.toast-close {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  display: flex;
+}
+.toast-close:hover { color: var(--text); }
+.toast-close svg { width: 14px; height: 14px; }
+@media (max-width: 640px) {
+  #toast-container { left: 16px; right: 16px; top: 16px; max-width: none; }
+}
+
 .modal h3 {
   margin: 0 0 18px;
   font-size: 16px;
@@ -1392,6 +1756,52 @@ tbody tr:last-child td { border-bottom: none; }
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Custom checkbox — overrides the browser-default square everywhere in the
+   app shell (settings toggles, camera-modal relay/motion toggles, bulk-edit
+   toggles) with one consistent themed control, instead of each spot inheriting
+   whatever the OS/browser renders. Unscoped (not `#app ...`) on purpose —
+   modals (#camera-modal, #bulk-edit-modal, ...) are DOM siblings of #app, not
+   descendants, so an `#app`-scoped selector silently never matched them; the
+   login screen has no checkboxes anyway so there's nothing to accidentally
+   catch by going global. */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1.5px solid var(--border);
+  background: var(--panel-3);
+  vertical-align: middle;
+  position: relative;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin: 0 2px 0 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+input[type="checkbox"]:hover { border-color: var(--border-hover); }
+input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+input[type="checkbox"]:checked {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+}
+input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
 }
 .relay-field {
   background: var(--panel-3);
@@ -1435,9 +1845,48 @@ tbody tr:last-child td { border-bottom: none; }
 .form-msg { font-size: 12px; min-height: 16px; margin-top: 4px; }
 .form-msg.error { color: var(--rec); }
 
+/* ---- "Tentang Aplikasi" modal ---- */
+.about-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 18px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.about-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 4px 12px rgba(79, 140, 255, 0.35);
+}
+.about-logo svg { width: 22px; height: 22px; }
+.about-logo img { width: 100%; height: 100%; object-fit: contain; border-radius: 12px; }
+.about-app-name { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+.about-version { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+.about-grid { display: flex; flex-direction: column; gap: 2px; }
+.about-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 13px;
+}
+.about-row:last-child { border-bottom: none; }
+.about-label { color: var(--text-dim); }
+.about-value { font-weight: 600; text-align: right; }
+.about-loading { padding: 16px 2px; font-size: 13px; color: var(--text-dim); text-align: center; }
+
 /* ---- Pengaturan (Settings) ---- */
 .settings-section {
-  background: var(--panel);
+  background: linear-gradient(155deg, var(--panel) 0%, var(--panel-deep) 100%);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   padding: 20px 22px;
@@ -1484,6 +1933,64 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .logo-preview-box img { width: 100%; height: 100%; object-fit: contain; }
 .form-msg.ok { color: var(--live); }
+
+.file-input-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.file-input-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.file-input-btn { font-size: 12.5px; padding: 8px 14px; }
+.file-input-native:focus-visible + .file-input-btn {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.file-input-name { font-size: 12.5px; color: var(--text-dim); }
+
+/* ---- Aktivitas Pengguna ---- */
+.activity-filters { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.activity-filters select {
+  padding: 8px 12px;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  min-width: 200px;
+}
+.activity-filters select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.activity-user-cell { display: flex; flex-direction: column; gap: 2px; }
+.activity-user-name { font-weight: 600; }
+.activity-system-actor { color: var(--text-faint); font-style: italic; }
+
+/* Generic tone-colored pill badge — same semantic tones EVENT_META already
+   assigns per event type (info/success/warn/error/user/neutral), reused here
+   instead of inventing a second color language for the same concept. */
+.tone-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--tone-soft, var(--panel-2));
+  color: var(--tone-color, var(--text-dim));
+}
+.tone-badge.tone-info { --tone-color: var(--accent); --tone-soft: var(--accent-soft); }
+.tone-badge.tone-success { --tone-color: var(--live); --tone-soft: var(--live-soft); }
+.tone-badge.tone-warn { --tone-color: var(--warn); --tone-soft: var(--warn-soft); }
+.tone-badge.tone-error { --tone-color: var(--rec); --tone-soft: var(--rec-soft); }
+.tone-badge.tone-neutral { --tone-color: var(--text-faint); --tone-soft: var(--panel-2); }
+.tone-badge.tone-user { --tone-color: var(--accent-2); --tone-soft: rgba(124, 92, 255, 0.14); }
 
 .player-modal { width: min(860px, 90vw); }
 .focus-modal { width: min(900px, 92vw); }
@@ -1641,6 +2148,16 @@ html, body { overflow-x: hidden; } /* belt-and-suspenders: nothing should be abl
 @media (max-width: 640px) {
   .main-header { flex-wrap: wrap; gap: 10px; }
   .main-header h2 { font-size: 18px; }
+  /* Without a forced full-width basis, the title block and the button group
+     both stayed free to size-to-content on the same flex line — once there
+     wasn't room for both, the title text wrapped ("Live" / "view") *instead
+     of* dropping to its own row, and the buttons rode up beside the now-
+     narrower, now-taller title rather than cleanly below it. Forcing the
+     title to claim the whole line guarantees the button group wraps below
+     it as a distinct row, and the title itself gets enough width back that
+     it stops needing to wrap in the first place. */
+  .main-header-title { flex: 1 1 100%; }
+  .header-actions { width: 100%; }
 
   .grid,
   .grid.layout-1x1,
@@ -1671,4 +2188,206 @@ html, body { overflow-x: hidden; } /* belt-and-suspenders: nothing should be abl
   .sub-tab { padding: 10px 12px; white-space: nowrap; }
 
   .table-wrap table { min-width: 480px; }
+  /* Every data table here is wider than a phone screen (Peta Lokasi,
+     Rekaman, Kesehatan Kamera, Manajemen User, Aktivitas Pengguna all have
+     more columns than fit), so it scrolls horizontally inside .table-wrap —
+     but a first-time visitor has no way to tell that from a table that just
+     looks cut off at the right edge, especially once the row-action buttons
+     (Edit/Hapus/Unduh) are the thing hidden past it. This fade is a static,
+     always-on hint rather than a scroll-position-tracking one (would need
+     JS) — simple trade-off, but it at least signals "there's more here".*/
+  .table-wrap { position: relative; }
+  .table-wrap::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 22px;
+    background: linear-gradient(to right, transparent, rgba(0, 0, 0, 0.28));
+    pointer-events: none;
+  }
+  .row-actions button { padding: 5px 9px; font-size: 11px; }
 }
+
+/* ---- Kesehatan Kamera (uptime trends) ---- */
+.health-table-wrap table { min-width: 760px; }
+.health-uptime-pill {
+  display: inline-block;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.health-uptime-pill.tone-success { color: var(--live); background: var(--live-soft); }
+.health-uptime-pill.tone-warn { color: var(--warn); background: var(--warn-soft); }
+.health-uptime-pill.tone-error { color: var(--rec); background: var(--rec-soft); }
+
+.health-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.health-status-badge .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex-shrink: 0; }
+.health-status-badge.online { color: var(--live); }
+.health-status-badge.online .status-dot { background: var(--live); box-shadow: 0 0 6px var(--live); }
+.health-status-badge.offline { color: var(--rec); }
+.health-status-badge.offline .status-dot { background: var(--rec); box-shadow: 0 0 6px var(--rec); }
+
+/* A segmented "state over time" bar rather than a line/area chart — the
+   underlying data is binary (up/down), so a track with red downtime
+   segments reads at a glance the way a status-page uptime bar does,
+   without implying a magnitude the data doesn't have. */
+.health-timeline {
+  position: relative;
+  width: 180px;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--live-soft);
+  overflow: hidden;
+}
+.health-timeline-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--rec);
+}
+@media (max-width: 640px) {
+  .health-table-wrap table { min-width: 640px; }
+  .health-timeline { width: 100px; }
+}
+
+/* ---- Bulk select (edit lokasi/motion detection untuk banyak kamera) ---- */
+#bulk-select-toggle-btn.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: #fff;
+}
+
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--accent-soft);
+  border: 1px solid rgba(79, 140, 255, 0.3);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.bulk-action-bar-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.tile.bulk-selectable { cursor: pointer; }
+.tile.bulk-selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+.bulk-select-checkbox {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  background: rgba(10, 12, 16, 0.55);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  z-index: 2;
+}
+.bulk-select-checkbox.checked {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: #fff;
+}
+
+.bulk-edit-group + .bulk-edit-group { margin-top: 16px; }
+.bulk-edit-group > label { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+.bulk-edit-subfields {
+  margin: 10px 0 0 26px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-soft);
+}
+
+/* ---- Dashboard: Volume Kejadian per Hari (stacked bar chart) ---- */
+.dashboard-panel-wide { margin-bottom: 20px; }
+/* Specificity note: .dashboard-panel > div forces flex-direction:column +
+   align-items:stretch on every direct <div> child (for the dashboard's own
+   stacked panels) — this header needs a row instead, so this selector has
+   to out-specificity it (see the identical note on .sop-roles). */
+.dashboard-panel.dashboard-panel-wide > .dashboard-panel-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.dashboard-panel-head h3 { margin: 0; }
+
+#events-chart { position: relative; }
+.events-chart-wrap { width: 100%; overflow-x: auto; }
+.events-chart-svg { display: block; height: 220px; }
+.events-chart-grid { stroke: var(--border-soft); stroke-width: 1; }
+.events-chart-axis-label {
+  font-size: 9.5px;
+  fill: var(--text-faint);
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.events-chart-bar-group rect[fill^="var"] { transition: opacity 0.12s ease; }
+.events-chart-bar-group:hover rect[fill^="var"],
+.events-chart-bar-group:focus rect[fill^="var"] { opacity: 0.75; }
+.events-chart-bar-group { outline: none; cursor: pointer; }
+.events-chart-bar-group:focus-visible rect:first-child { stroke: var(--accent); stroke-width: 1; }
+
+.events-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+.events-chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.events-chart-legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+.events-chart-tooltip {
+  position: absolute;
+  z-index: 10;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  padding: 8px 10px;
+  font-size: 12px;
+  pointer-events: none;
+  min-width: 150px;
+  transform: translateY(-100%);
+}
+.events-chart-tooltip-date { font-weight: 700; margin-bottom: 6px; color: var(--text); }
+.events-chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  padding: 2px 0;
+}
+.events-chart-tooltip-count { margin-left: auto; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }

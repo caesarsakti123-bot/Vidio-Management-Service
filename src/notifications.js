@@ -1,6 +1,15 @@
 const nodemailer = require('nodemailer');
 const settings = require('./settings');
 
+// Camera name/IP are free-text fields an operator controls (cameras.js does
+// no format validation on either) but end up interpolated straight into an
+// HTML email body below — without this, a camera named e.g.
+// `<a href="//evil">click</a>` would render as a live link/markup in
+// whatever mail client the notification lands in.
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function isConfigured() {
   return settings.getSetting('smtp_enabled') === 'true'
     && !!settings.getSetting('smtp_host')
@@ -61,7 +70,7 @@ async function sendTestEmail() {
 function sendCameraOfflineAlert(camera) {
   return sendMail(
     `Kamera offline: ${camera.name}`,
-    `<p>Kamera <b>${camera.name}</b> (IP: ${camera.ip}) tidak bisa dijangkau sejak ${new Date().toLocaleString('id-ID')}.</p>
+    `<p>Kamera <b>${escapeHtml(camera.name)}</b> (IP: ${escapeHtml(camera.ip)}) tidak bisa dijangkau sejak ${new Date().toLocaleString('id-ID')}.</p>
      <p>Cek koneksi jaringan, status perangkat, atau kredensial kamera ini.</p>`
   );
 }
@@ -69,7 +78,7 @@ function sendCameraOfflineAlert(camera) {
 function sendCameraRecoveredAlert(camera) {
   return sendMail(
     `Kamera kembali online: ${camera.name}`,
-    `<p>Kamera <b>${camera.name}</b> (IP: ${camera.ip}) sudah bisa dijangkau lagi per ${new Date().toLocaleString('id-ID')}.</p>`
+    `<p>Kamera <b>${escapeHtml(camera.name)}</b> (IP: ${escapeHtml(camera.ip)}) sudah bisa dijangkau lagi per ${new Date().toLocaleString('id-ID')}.</p>`
   );
 }
 

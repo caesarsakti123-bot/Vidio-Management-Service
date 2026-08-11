@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { db } = require('./db');
 const { camDir } = require('./recording');
+const settings = require('./settings');
 
 const router = express.Router();
 
@@ -11,7 +12,11 @@ router.get('/stats', (req, res) => {
   res.json({
     count: row.count,
     total_bytes: row.total_bytes,
-    retention_days: Number(process.env.RETENTION_DAYS || 14),
+    // Must match what recording.js's cleanup job actually uses (the
+    // settings table, which the Pengaturan page writes to and which wins
+    // over .env) — reading process.env directly here reported a stale
+    // number once an admin changed retention from the Pengaturan UI.
+    retention_days: Number(settings.getSetting('retention_days')) || 14,
   });
 });
 

@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const fs = require('fs');
 const onvif = require('onvif');
 const { db, logEvent, getCameraById, decryptCamera } = require('./db');
 const { encrypt, decrypt } = require('./crypto');
@@ -46,6 +47,16 @@ const PRIVATE_IP_RE = /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01]
 
 function isPublicIp(ip) {
   return typeof ip === 'string' && !PRIVATE_IP_RE.test(ip);
+}
+
+// foreign_keys is ON (db.js) so an insert/update against a location_id that
+// no longer exists now throws a raw SqliteError instead of silently storing
+// a dangling reference — check first and return a real 400 instead of
+// letting that surface as an opaque 500 (e.g. an admin submits a camera
+// form with a location that someone else just deleted from a stale
+// dropdown).
+function locationExists(id) {
+  return !!db.prepare('SELECT 1 FROM locations WHERE id = ?').get(id);
 }
 
 // Best-effort: place a freshly auto-created location's pin using free IP
@@ -105,8 +116,13 @@ router.get('/', (req, res) => {
 
 router.post('/', requireRole(['admin', 'operator']), (req, res) => {
   let { name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, ptz_supported, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, is_relay } = req.body;
+  // Sanitize before checking presence — a whitespace-only name (" ") is
+  // truthy and would otherwise sail past `!name`, then come out of
+  // sanitizeName() as '' and get stored as a nameless camera (and, via
+  // resolveAutoLocation('') below, a nameless auto-created location too).
+  name = name ? sanitizeName(name) : '';
   if (!name || !ip) return res.status(400).json({ error: 'name dan ip wajib diisi' });
-  name = sanitizeName(name);
+  if (location_id && !locationExists(location_id)) return res.status(400).json({ error: 'Lokasi tidak ditemukan' });
   building = building ? sanitizeName(building) : null;
 
   const finalRtspUrl = rtsp_url || (rtsp_path
@@ -144,7 +160,7 @@ router.post('/', requireRole(['admin', 'operator']), (req, res) => {
 
   const camera = getCameraById(info.lastInsertRowid);
   motion.syncCamera(camera);
-  logEvent(info.lastInsertRowid, 'camera_added', `Kamera "${name}" (${brand || 'unknown'}) ditambahkan`);
+  logEvent(info.lastInsertRowid, 'camera_added', `Kamera "${name}" (${brand || 'unknown'}) ditambahkan`, req.user);
   res.status(201).json({ id: info.lastInsertRowid, relay_token: relayToken });
 
   if (autoLocation?.isNew && isPublicIp(ip)) {
@@ -166,6 +182,72 @@ router.put('/reorder', requireRole(['admin', 'operator']), (req, res) => {
   res.json({ ok: true });
 });
 
+// Must be registered before /:id, same reason as /reorder above.
+//
+// Scoped deliberately to fields that make sense applied identically across
+// many cameras at once (grouping + motion behavior) — connection details
+// (IP, RTSP, credentials) are camera-specific and stay on the single-camera
+// edit form; rebuilding rtsp_url/relay tokens per camera the way PUT /:id
+// does wouldn't even mean anything applied to 50 different cameras at once.
+router.put('/bulk', requireRole(['admin', 'operator']), (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids harus berupa array kamera yang tidak kosong' });
+  }
+  const numericIds = [...new Set(ids.map(Number).filter((n) => Number.isInteger(n)))];
+  if (numericIds.length === 0) return res.status(400).json({ error: 'ids tidak valid' });
+
+  const fields = ['location_id', 'building', 'motion_detection_enabled', 'motion_sensitivity', 'motion_recording_enabled'];
+  const updates = fields.filter((f) => f in req.body);
+  if (updates.length === 0) return res.status(400).json({ error: 'Tidak ada field untuk diupdate' });
+
+  if (updates.includes('building')) {
+    req.body.building = req.body.building ? sanitizeName(req.body.building) : null;
+  }
+  if (updates.includes('location_id') && req.body.location_id && !locationExists(req.body.location_id)) {
+    return res.status(400).json({ error: 'Lokasi tidak ditemukan' });
+  }
+
+  const setClause = updates.map((f) => `${f} = ?`).join(', ');
+  const values = updates.map((f) => {
+    if (f === 'motion_detection_enabled' || f === 'motion_recording_enabled') {
+      // better-sqlite3 can't bind a JS boolean — see the matching note on
+      // PUT /:id below.
+      return req.body[f] ? 1 : 0;
+    }
+    if (f === 'motion_sensitivity') {
+      return Number(req.body[f]) || 0.04;
+    }
+    return req.body[f];
+  });
+
+  const stmt = db.prepare(`UPDATE cameras SET ${setClause} WHERE id = ?`);
+  const applyAll = db.transaction((camIds) => {
+    let count = 0;
+    for (const camId of camIds) {
+      const info = stmt.run(...values, camId);
+      if (info.changes > 0) count += 1;
+    }
+    return count;
+  });
+  const updatedCount = applyAll(numericIds);
+
+  // Motion detector child processes need to be (re)started/stopped per
+  // camera after the DB write, same as PUT /:id does for a single camera —
+  // the settings column changing alone doesn't touch the running ffmpeg
+  // process.
+  const motionFieldsChanged = updates.includes('motion_detection_enabled') || updates.includes('motion_sensitivity') || updates.includes('motion_recording_enabled');
+  if (motionFieldsChanged) {
+    for (const camId of numericIds) {
+      const cam = getCameraById(camId);
+      if (cam) motion.syncCamera(cam);
+    }
+  }
+
+  logEvent(null, 'cameras_bulk_updated', `${updatedCount} kamera diperbarui sekaligus (${updates.join(', ')})`, req.user);
+  res.json({ ok: true, updated: updatedCount });
+});
+
 router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
   const id = Number(req.params.id);
   const cam = getCameraById(id);
@@ -174,6 +256,17 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
   const fields = ['name', 'brand', 'ip', 'rtsp_port', 'onvif_port', 'username', 'password', 'rtsp_path', 'rtsp_url', 'ptz_supported', 'recording_enabled', 'motion_detection_enabled', 'motion_sensitivity', 'motion_recording_enabled', 'location_id', 'building', 'is_relay'];
   const updates = fields.filter(f => f in req.body);
   if (updates.length === 0) return res.status(400).json({ error: 'Tidak ada field untuk diupdate' });
+
+  // Sanitize before checking presence — a whitespace-only name (" ") is
+  // truthy, so without this a rename to " " would sail through and get
+  // stored as an empty string (sanitizeName trims it to '').
+  if (updates.includes('name')) {
+    req.body.name = sanitizeName(req.body.name || '');
+    if (!req.body.name) return res.status(400).json({ error: 'name tidak boleh kosong' });
+  }
+  if (updates.includes('location_id') && req.body.location_id && !locationExists(req.body.location_id)) {
+    return res.status(400).json({ error: 'Lokasi tidak ditemukan' });
+  }
 
   // Turning relay mode on for the first time needs a fresh token; turning it
   // back on later keeps whatever token was already issued (the agent's
@@ -202,7 +295,14 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
     // silently updating the columns while streaming keeps using old creds.
     let path = merged.rtsp_path;
     if (!path && cam.rtsp_url) {
-      try { path = new URL(cam.rtsp_url).pathname; } catch { /* not a parseable rtsp URL, skip */ }
+      // .search must come along with .pathname — some cameras (notably many
+      // Hikvision/Dahua ONVIF responses) put required parameters in the
+      // query string (e.g. "?transportmode=unicast"); dropping it here would
+      // silently rebuild a URL the camera no longer accepts.
+      try {
+        const u = new URL(cam.rtsp_url);
+        path = u.pathname + u.search;
+      } catch { /* not a parseable rtsp URL, skip */ }
     }
     if (path) {
       req.body.rtsp_url = `rtsp://${merged.username ? `${encodeURIComponent(merged.username)}:${encodeURIComponent(merged.password || '')}@` : ''}${merged.ip}:${merged.rtsp_port || 554}${path}`;
@@ -212,7 +312,11 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
 
   const setClause = updates.map(f => `${f} = ?`).join(', ');
   const values = updates.map((f) => {
-    if (f === 'motion_detection_enabled' || f === 'motion_recording_enabled' || f === 'is_relay') {
+    if (f === 'motion_detection_enabled' || f === 'motion_recording_enabled' || f === 'is_relay' || f === 'ptz_supported' || f === 'recording_enabled') {
+      // better-sqlite3 can't bind a JS boolean — without this coercion,
+      // PUT {"ptz_supported": true} (the obvious way to send it, matching
+      // how every other boolean field here is sent) throws and 500s instead
+      // of storing 1/0.
       return req.body[f] ? 1 : 0;
     }
     if (f === 'motion_sensitivity') {
@@ -236,15 +340,43 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
 
   const updatedCam = getCameraById(id);
   motion.syncCamera(updatedCam);
+  logEvent(id, 'camera_updated', `Kamera "${updatedCam.name}" diperbarui (${updates.join(', ')})`, req.user);
   res.json({ ok: true, relay_token: updatedCam.relay_token, is_relay: updatedCam.is_relay === 1 });
 });
 
-router.delete('/:id', requireRole('admin'), (req, res) => {
+router.delete('/:id', requireRole('admin'), async (req, res) => {
   const id = Number(req.params.id);
-  streaming.stopStream(id);
-  recording.stopRecording(id);
+  const cam = db.prepare('SELECT name FROM cameras WHERE id = ?').get(id);
   motion.stopDetector(id);
+  // Force-stop and wait for both ffmpeg processes to actually exit before
+  // touching their directories below — a bare SIGTERM (the old stopStream())
+  // returns immediately, so the rmSync calls used to race the still-exiting
+  // process for its open file handles (EBUSY/EPERM on Windows), leaving the
+  // directory orphaned since the camera row is gone by the time anyone would
+  // revisit it. Also, unlike stopStream(), this stops the stream outright
+  // regardless of how many viewers currently have it open — correct here
+  // since the camera itself is being deleted.
+  await Promise.all([
+    streaming.stopStreamAndWait(id),
+    recording.stopRecordingAndWait(id),
+  ]);
+  // The `recordings` row cleanup is handled by ON DELETE CASCADE (now that
+  // foreign_keys is enabled, db.js), but that only removes database rows —
+  // the actual video files on disk have to be removed here explicitly, or
+  // they'd sit orphaned forever (never revisited by reconcileAndCleanup,
+  // which only walks directories for cameras still present in the table).
+  try {
+    fs.rmSync(recording.camDir(id), { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[cameras] gagal menghapus folder rekaman kamera ${id}: ${err.message}`);
+  }
+  try {
+    fs.rmSync(streaming.streamDirFor(id), { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[cameras] gagal menghapus folder live stream kamera ${id}: ${err.message}`);
+  }
   db.prepare('DELETE FROM cameras WHERE id = ?').run(id);
+  logEvent(id, 'camera_deleted', `Kamera "${cam ? cam.name : `#${id}`}" dihapus`, req.user);
   res.json({ ok: true });
 });
 
@@ -282,7 +414,7 @@ router.post('/:id/onvif/probe', requireRole(['admin', 'operator']), async (req, 
 
       const updatedCam = getCameraById(id);
       motion.syncCamera(updatedCam);
-      logEvent(id, 'onvif_probe_ok', 'Berhasil mengambil stream URI via ONVIF');
+      logEvent(id, 'onvif_probe_ok', 'Berhasil mengambil stream URI via ONVIF', req.user);
       responded = true;
       res.json({
         rtsp_url: stream.uri,

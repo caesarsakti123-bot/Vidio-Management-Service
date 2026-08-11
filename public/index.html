@@ -3,6 +3,16 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<script>
+  // Applied synchronously (before CSS/first paint) so switching to light
+  // theme on reload never flashes dark first — a class/attribute set from
+  // app.js after load would be visibly too late.
+  (function () {
+    if (localStorage.getItem('vms_theme') === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  })();
+</script>
 <title>Open VMS — Unified Video Management</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f8cff'/%3E%3Cstop offset='1' stop-color='%237c5cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='24' height='24' rx='6' fill='url(%23g)'/%3E%3Ccircle cx='12' cy='12' r='4.5' fill='white' fill-opacity='0.92'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%234f8cff'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -38,6 +48,10 @@
     <div class="brand">
       <span class="brand-mark" id="sidebar-brand-mark"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4.5" fill="white" fill-opacity="0.95"/><circle cx="12" cy="12" r="1.8" fill="#4f8cff"/></svg></span>
       <span id="sidebar-app-name">Open VMS</span>
+      <button class="alert-bell" id="theme-toggle-btn" title="Ganti tema terang/gelap">
+        <svg class="theme-icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="theme-icon-moon hidden" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
       <button class="alert-bell" id="alert-bell-btn" title="Notifikasi">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
         <span class="alert-bell-badge hidden" id="alert-bell-badge">0</span>
@@ -47,13 +61,6 @@
       </button>
     </div>
 
-    <div class="alert-panel hidden" id="alert-panel">
-      <div class="alert-panel-header">
-        <span>Notifikasi</span>
-        <button id="alert-ack-all-btn">Tandai semua dibaca</button>
-      </div>
-      <div class="alert-panel-list" id="alert-panel-list"></div>
-    </div>
     <div class="nav-item active" data-view="dashboard">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
       Dashboard
@@ -81,16 +88,43 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
       Log peristiwa
     </div>
+    <div class="nav-item" data-view="health">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      Kesehatan Kamera
+    </div>
     <div class="nav-item" data-view="users" style="display:none">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       Manajemen User
     </div>
-    <div class="nav-item" data-view="settings" style="display:none">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      Pengaturan
+    <div class="nav-item" data-view="activity" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      Aktivitas Pengguna
     </div>
     <div class="sidebar-footer">
       <div id="whoami"></div>
+      <button type="button" class="btn secondary" id="footer-settings-btn">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Pengaturan
+        <svg class="footer-settings-chevron" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div class="footer-settings-menu hidden" id="footer-settings-menu">
+        <button type="button" class="btn secondary" id="settings-page-link" style="display:none">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Pengaturan Sistem
+        </button>
+        <button type="button" class="btn secondary" id="change-password-btn">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          Ganti Password
+        </button>
+        <button type="button" class="btn secondary" id="sop-link">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+          SOP Aplikasi
+        </button>
+        <button type="button" class="btn secondary" id="about-link">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/></svg>
+          Tentang Aplikasi
+        </button>
+      </div>
       <button class="btn secondary" id="logout-btn">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
         Keluar
@@ -98,11 +132,36 @@
     </div>
   </div>
 
+  <!-- Sibling of .sidebar (not nested inside it) — a `transform` on any
+       ancestor creates a new containing block for position:fixed
+       descendants, so nesting this inside .sidebar meant it got dragged
+       off-screen along with the sidebar whenever the mobile drawer's
+       translateX(-280px) applied. -->
+  <div class="alert-panel hidden" id="alert-panel">
+    <div class="alert-panel-header">
+      <span>Notifikasi</span>
+      <button id="alert-ack-all-btn">Tandai semua dibaca</button>
+    </div>
+    <div class="alert-panel-list" id="alert-panel-list"></div>
+  </div>
+
   <div class="main">
     <div id="view-dashboard">
       <div class="main-header"><h2>Dashboard</h2></div>
 
       <div class="stat-grid" id="dashboard-stats"></div>
+
+      <div class="dashboard-panel dashboard-panel-wide">
+        <div class="dashboard-panel-head">
+          <h3>Volume Kejadian per Hari</h3>
+          <div class="header-actions" id="events-chart-range-picker">
+            <button type="button" class="chip" data-days="7">7 Hari</button>
+            <button type="button" class="chip active" data-days="14">14 Hari</button>
+            <button type="button" class="chip" data-days="30">30 Hari</button>
+          </div>
+        </div>
+        <div id="events-chart"></div>
+      </div>
 
       <div class="dashboard-columns">
         <div class="dashboard-panel">
@@ -120,6 +179,10 @@
       <div class="main-header">
         <h2>Live view</h2>
         <div class="header-actions">
+          <button class="btn secondary" id="bulk-select-toggle-btn" title="Pilih beberapa kamera untuk diedit lokasi/motion detection-nya sekaligus">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            Pilih Massal
+          </button>
           <button class="btn secondary" id="stream-stop-all-btn" title="Hentikan semua live view">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>
             Hentikan Semua
@@ -136,6 +199,15 @@
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
             Tambah kamera
           </button>
+        </div>
+      </div>
+
+      <div class="bulk-action-bar hidden" id="bulk-action-bar">
+        <span id="bulk-selected-count">0 kamera dipilih</span>
+        <div class="bulk-action-bar-buttons">
+          <button class="btn secondary" id="bulk-select-all-visible-btn">Pilih Semua yang Tampil</button>
+          <button class="btn" id="bulk-edit-open-btn" disabled>Edit Terpilih</button>
+          <button class="btn secondary" id="bulk-select-cancel-btn">Batal</button>
         </div>
       </div>
 
@@ -226,6 +298,7 @@
 
     <div id="view-recordings" class="hidden">
       <div class="main-header"><h2>Rekaman</h2></div>
+      <div class="stat-grid" id="recordings-stats"></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Kamera</th><th>File</th><th>Mulai</th><th>Ukuran</th><th></th></tr></thead>
@@ -265,6 +338,29 @@
       </div>
     </div>
 
+    <div id="view-activity" class="hidden">
+      <div class="main-header">
+        <h2>Aktivitas Pengguna</h2>
+        <div class="header-actions" id="activity-range-picker">
+          <button type="button" class="chip" data-days="1">24 Jam</button>
+          <button type="button" class="chip active" data-days="7">7 Hari</button>
+          <button type="button" class="chip" data-days="30">30 Hari</button>
+          <button type="button" class="chip" data-days="90">90 Hari</button>
+        </div>
+      </div>
+      <div class="activity-filters">
+        <select id="activity-user-filter">
+          <option value="">Semua User</option>
+        </select>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Waktu</th><th>User</th><th>Aksi</th><th>Detail</th></tr></thead>
+          <tbody id="activity-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div id="view-settings" class="hidden">
       <div class="main-header"><h2>Pengaturan</h2></div>
 
@@ -287,8 +383,12 @@
           <div class="logo-upload-row">
             <div class="logo-preview-box"><img id="settings-logo-preview" class="hidden" /></div>
             <div>
-              <input type="file" id="settings-logo-file" accept="image/png,image/jpeg,image/svg+xml,image/webp" />
-              <div class="field-hint">PNG/JPG/SVG/WebP, maksimal 2MB. Diupload otomatis begitu dipilih.</div>
+              <div class="file-input-row">
+                <input type="file" id="settings-logo-file" class="file-input-native" accept="image/png,image/jpeg,image/webp" />
+                <label for="settings-logo-file" class="btn secondary file-input-btn">Pilih File</label>
+                <span class="file-input-name" id="settings-logo-filename">Belum ada file dipilih</span>
+              </div>
+              <div class="field-hint">PNG/JPG/WebP, maksimal 2MB. Diupload otomatis begitu dipilih.</div>
             </div>
           </div>
           <div class="form-msg" id="settings-logo-msg"></div>
@@ -357,6 +457,248 @@
           <button class="btn" id="settings-save-healthcheck-btn">Simpan Health Check</button>
           <div class="form-msg" id="settings-healthcheck-msg"></div>
         </div>
+      </div>
+    </div>
+
+    <div id="view-sop" class="hidden">
+      <div class="main-header"><h2>SOP Aplikasi</h2></div>
+      <div class="sop-view">
+        <p class="sop-intro">Panduan penggunaan VMS IAS — mulai dari menambah kamera sampai menangani gangguan live view yang paling sering terjadi.</p>
+
+        <nav class="sop-quicknav" aria-label="Navigasi cepat SOP">
+          <a href="#sop-s0">Peran &amp; Akses</a>
+          <a href="#sop-s1">Masuk Aplikasi</a>
+          <a href="#sop-s2">Menambah Kamera</a>
+          <a href="#sop-s3">Live View</a>
+          <a href="#sop-s4">Kontrol PTZ</a>
+          <a href="#sop-s5">Rekaman &amp; Retensi</a>
+          <a href="#sop-s6">Deteksi Gerakan</a>
+          <a href="#sop-s7">Lokasi &amp; Peta</a>
+          <a href="#sop-s8">Manajemen User</a>
+          <a href="#sop-s9">Pengaturan Sistem</a>
+          <a href="#sop-s10">Notifikasi Offline</a>
+          <a href="#sop-s11">Troubleshooting</a>
+          <a href="#sop-s12">Praktik Baik</a>
+        </nav>
+
+        <div class="dashboard-panel sop-section" id="sop-s0">
+          <h3>§0 Peran &amp; Akses Pengguna</h3>
+          <p>Sistem mengenal tiga peran. Setiap akun hanya punya satu peran, dan hak aksesnya berlaku di seluruh aplikasi — bukan per kamera.</p>
+          <div class="sop-roles">
+            <span class="role-badge admin">Admin</span>
+            <span class="role-badge operator">Operator</span>
+            <span class="role-badge viewer">Viewer</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Aksi</th><th>Admin</th><th>Operator</th><th>Viewer</th></tr></thead>
+              <tbody>
+                <tr><td>Lihat daftar kamera &amp; status live/rec/motion</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Nyalakan/matikan live stream</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Lihat &amp; unduh rekaman</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                <tr><td>Tambah / edit / atur ulang urutan kamera</td><td>✓</td><td>✓</td><td>—</td></tr>
+                <tr><td>Probe ONVIF, kontrol PTZ</td><td>✓</td><td>✓</td><td>—</td></tr>
+                <tr><td>Start/stop rekaman manual, toggle motion detection</td><td>✓</td><td>✓</td><td>—</td></tr>
+                <tr><td>Tambah / edit lokasi</td><td>✓</td><td>✓</td><td>—</td></tr>
+                <tr><td>Hapus kamera atau lokasi</td><td>✓</td><td>—</td><td>—</td></tr>
+                <tr><td>Kelola user (tambah/edit/hapus akun)</td><td>✓</td><td>—</td><td>—</td></tr>
+                <tr><td>Buka halaman Pengaturan (semua tab)</td><td>✓</td><td>—</td><td>—</td></tr>
+                <tr><td>Lihat kredensial kamera (password/RTSP URL)</td><td>✓</td><td>✓</td><td>Disamarkan</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="sop-callout">
+            <div><b>Catatan</b><p>Viewer bersifat read-only murni: cocok untuk petugas yang hanya perlu memantau layar, tanpa risiko tidak sengaja mengubah pengaturan kamera atau menghapus data.</p></div>
+          </div>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s1">
+          <h3>§1 Masuk ke Aplikasi</h3>
+          <p class="dim">Berlaku untuk semua peran.</p>
+          <ol>
+            <li>Buka alamat aplikasi di browser.</li>
+            <li>Masukkan <strong>Username</strong> dan <strong>Password</strong> yang diberikan admin, lalu klik <strong>Masuk</strong>.</li>
+            <li>Sesi login bertahan <strong>12 jam</strong> — setelah itu, sistem meminta login ulang otomatis.</li>
+          </ol>
+          <div class="sop-callout warn">
+            <div><b>Perhatian</b><p>Jangan bagikan akun admin ke operator harian. Buat akun terpisah dengan peran Operator atau Viewer sesuai kebutuhan tugas (lihat §8).</p></div>
+          </div>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s2">
+          <h3>§2 Menambah &amp; Mengatur Kamera</h3>
+          <div class="sop-roles"><span class="role-badge admin">Admin</span><span class="role-badge operator">Operator</span></div>
+          <p>Klik <strong>+ Tambah kamera</strong> di halaman Live View. Field wajib hanya <strong>Nama</strong> dan <strong>Alamat IP</strong> — sisanya opsional dan bisa dilengkapi belakangan.</p>
+          <h4>Cara mengisi RTSP</h4>
+          <ul>
+            <li><strong>Manual</strong> — isi kolom RTSP path (contoh: <span class="sop-code">/Streaming/Channels/101</span>) beserta username/password kamera. Sistem otomatis merakit URL RTSP lengkap.</li>
+            <li><strong>Probe ONVIF</strong> — simpan kamera dulu, lalu buka menu <span class="sop-code">···</span> pada tile → <strong>Probe ONVIF</strong>. Sistem mengambil sendiri URL stream dan mendeteksi dukungan PTZ. Tidak berlaku untuk kamera relay.</li>
+          </ul>
+          <h4>Kamera di jaringan privat (relay agent)</h4>
+          <p>Untuk kamera yang IP-nya tidak bisa dijangkau langsung dari server, centang <strong>"Kamera di jaringan privat"</strong>. Sistem menampilkan perintah siap-pakai:</p>
+          <pre class="sop-code-block">node relay-agent.js --server=&lt;alamat-server&gt; --token=&lt;token&gt; --rtsp="rtsp://..."</pre>
+          <p>Jalankan perintah ini di PC yang satu jaringan dengan kamera tersebut. Kamera relay tidak mendukung Probe ONVIF, PTZ, atau rekam manual dari server pusat.</p>
+          <h4>Import banyak kamera sekaligus (CSV)</h4>
+          <p>Klik <strong>Import CSV</strong> → unduh template dulu. Kolom yang dipakai: <span class="sop-code">name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, location</span>. Baris tanpa <span class="sop-code">name</span>/<span class="sop-code">ip</span> otomatis dilewati.</p>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s3">
+          <h3>§3 Live View — Pemantauan Langsung</h3>
+          <div class="sop-roles"><span class="role-badge all">Semua peran</span></div>
+          <p>Klik <strong>Live</strong> pada tile kamera untuk mulai menonton; klik lagi untuk berhenti. Tombol <strong>Nyalakan Semua</strong> / <strong>Hentikan Semua</strong> berlaku untuk seluruh kamera pada filter yang sedang aktif.</p>
+          <ul>
+            <li>Gunakan pencarian dan filter Status/Fungsi untuk mempersempit daftar kamera.</li>
+            <li>Pilih tata letak grid (1×1 sampai 4×4, atau spotlight) sesuai kebutuhan.</li>
+            <li>Klik tile untuk membuka tampilan fokus lengkap dengan kontrol rekam dan motion.</li>
+          </ul>
+          <div class="sop-callout">
+            <div><b>Status badge</b><p>"Live" berarti gambar aktif. "Reconnecting" berarti sistem sedang mencoba menyambung ulang otomatis — normal untuk kamera di jaringan WAN dan akan pulih sendiri, tidak perlu diklik ulang.</p></div>
+          </div>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s4">
+          <h3>§4 Kontrol PTZ</h3>
+          <div class="sop-roles"><span class="role-badge admin">Admin</span><span class="role-badge operator">Operator</span></div>
+          <p>Kontrol arah panah dan tombol stop hanya muncul pada kamera yang mendukung PTZ (ditandai otomatis lewat Probe ONVIF). Tahan tombol arah untuk menggerakkan kamera, lepas untuk berhenti. Tidak berlaku untuk kamera relay.</p>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s5">
+          <h3>§5 Rekaman &amp; Retensi</h3>
+          <p><span class="role-badge admin">Admin</span> <span class="role-badge operator">Operator</span> dapat menyalakan/mematikan rekaman manual per kamera. <span class="role-badge all">Semua peran</span> dapat melihat dan mengunduh rekaman di menu Rekaman.</p>
+          <ul>
+            <li>Rekaman tersimpan dalam segmen berdurasi <strong>10 menit</strong> per file.</li>
+            <li>File otomatis dihapus setelah melewati masa retensi (default <strong>14 hari</strong>, diatur admin di §9).</li>
+            <li>Tombol <strong>Putar</strong> membuka pemutar video di browser; <strong>Unduh</strong> menyimpan file ke perangkat.</li>
+          </ul>
+          <div class="sop-callout warn">
+            <div><b>Perhatian</b><p>Masa retensi berlaku global untuk semua kamera. Kalau ada rekaman penting yang harus disimpan lebih lama, unduh filenya sebelum masa retensi habis.</p></div>
+          </div>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s6">
+          <h3>§6 Deteksi Gerakan (Motion Detection)</h3>
+          <div class="sop-roles"><span class="role-badge admin">Admin</span><span class="role-badge operator">Operator</span></div>
+          <p>Aktifkan lewat menu <span class="sop-code">···</span> pada tile → <strong>Hidupkan Motion</strong>, atau saat edit kamera. Sensitivitas diatur 0.01–0.50 (default 0.04) — makin kecil angkanya, makin sensitif.</p>
+          <ul>
+            <li>Setiap gerakan dicatat di Log Peristiwa, dengan jeda minimal <strong>10 detik</strong> antar-pencatatan.</li>
+            <li>Kalau <strong>"Rekam otomatis saat motion"</strong> juga aktif, sistem langsung merekam saat gerakan terdeteksi — rekaman ini <strong>tidak berhenti otomatis</strong>, harus dimatikan manual.</li>
+            <li>Motion detection butuh RTSP URL yang sudah terisi (lewat probe ONVIF atau input manual).</li>
+          </ul>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s7">
+          <h3>§7 Lokasi &amp; Peta</h3>
+          <div class="sop-roles"><span class="role-badge admin">Admin</span><span class="role-badge operator">Operator</span></div>
+          <p>Lokasi mengelompokkan kamera di sidebar dan filter Live View, serta menandai posisi di peta (menu Peta Lokasi). Tambah/edit lewat form, atau klik langsung di peta.</p>
+          <div class="sop-callout">
+            <div><b>Otomatis</b><p>Kamera baru tanpa lokasi manual akan ditebak lokasinya dari nama, dan khusus IP publik — diperkirakan koordinat kotanya dari IP tersebut. Akurasinya level kota saja, periksa dan sesuaikan pin secara manual bila perlu.</p></div>
+          </div>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s8">
+          <h3>§8 Manajemen User</h3>
+          <div class="sop-roles"><span class="role-badge admin">Admin</span></div>
+          <p>Menu ini hanya tampil untuk admin. Tambahkan satu akun per petugas (jangan berbagi akun), dan pilih peran sesuai tanggung jawabnya — lihat tabel akses di §0.</p>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s9">
+          <h3>§9 Pengaturan Sistem</h3>
+          <div class="sop-roles"><span class="role-badge admin">Admin</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Tab</th><th>Isi</th><th>Efek</th></tr></thead>
+              <tbody>
+                <tr><td>Branding</td><td>Nama aplikasi, logo (maks 2MB)</td><td>Tampil di sidebar &amp; halaman login</td></tr>
+                <tr><td>Notifikasi Email</td><td>SMTP host/port/user/pass, email tujuan</td><td>Peringatan kamera offline/online — lihat §10</td></tr>
+                <tr><td>Rekaman</td><td>Masa retensi (hari)</td><td>Lihat §5</td></tr>
+                <tr><td>Performa Live View</td><td>Lebar maks. transcode, frame rate, mode encoder</td><td>Keseimbangan kualitas gambar vs beban CPU/bandwidth server</td></tr>
+                <tr><td>Health Check</td><td>Interval cek, ambang gagal berturut-turut</td><td>Lihat §10</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="sop-callout warn">
+            <div><b>Performa</b><p>Mode encoder "Software saja" berguna kalau server tidak punya GPU Intel QuickSync (QSV) yang berfungsi, atau live view terasa tidak stabil saat banyak kamera menyala bersamaan — lihat §11.</p></div>
+          </div>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s10">
+          <h3>§10 Notifikasi Kamera Offline</h3>
+          <div class="sop-roles"><span class="role-badge admin">Admin</span></div>
+          <p>Sistem mengecek keterjangkauan tiap kamera secara berkala, terpisah dari live view. Dengan pengaturan default — cek tiap <strong>5 menit</strong>, dianggap offline setelah <strong>2 kali gagal</strong> berturut-turut — kamera baru ditandai offline setelah kira-kira <strong>10 menit</strong> tidak terjangkau.</p>
+          <p>Email notifikasi hanya terkirim kalau <em>semua</em> kolom di Pengaturan → Notifikasi Email terisi: toggle aktif, SMTP host, username, password, dan email tujuan. Gunakan tombol <strong>Kirim Email Test</strong> untuk memastikan konfigurasi sudah benar.</p>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s11">
+          <h3>§11 Troubleshooting Umum</h3>
+          <p class="dim">Gejala yang paling sering ditemui di lapangan, penyebab, dan cara mengatasinya.</p>
+
+          <div class="sop-ts-item">
+            <div class="sop-ts-symptom">Live stream terus-menerus "Reconnecting", gambar tidak pernah muncul</div>
+            <div class="sop-ts-row"><span class="k">Penyebab</span><span class="v">Kredensial kamera salah, RTSP path salah, atau kamera mati/tidak terjangkau.</span></div>
+            <div class="sop-ts-row"><span class="k">Solusi</span><span class="v">Cek Log Peristiwa untuk kamera itu — <span class="sop-code">401 Unauthorized</span> berarti password salah (perbaiki di Edit Kamera), <span class="sop-code">timeout</span> berarti masalah jaringan/kamera mati. Sistem terus mencoba sambung ulang otomatis — tidak perlu menekan Live berulang-ulang.</span></div>
+          </div>
+          <div class="sop-ts-item">
+            <div class="sop-ts-symptom">Menyalakan satu kamera baru membuat kamera lain yang stabil ikut "Reconnecting"</div>
+            <div class="sop-ts-row"><span class="k">Penyebab</span><span class="v">Terlalu banyak live stream memakai encoder hardware (QSV) bersamaan. Sistem sudah membatasi maksimal 3 sesi hardware sekaligus; kamera berikutnya otomatis pakai encoder software.</span></div>
+            <div class="sop-ts-row"><span class="k">Solusi</span><span class="v">Biasanya pulih sendiri dalam beberapa detik. Kalau sering terjadi, gunakan <strong>Nyalakan Semua</strong> (menyalakan bertahap) daripada mengeklik banyak kamera dengan cepat, atau pakai mode encoder "Software saja" di §9.</span></div>
+          </div>
+          <div class="sop-ts-item">
+            <div class="sop-ts-symptom">Gambar tampil, tapi ada tulisan besar "NO VIDEO" di dalam frame</div>
+            <div class="sop-ts-row"><span class="k">Penyebab</span><span class="v">Bukan masalah aplikasi — tulisan itu dikirim langsung oleh NVR, artinya channel sudah dikonfigurasi tapi tidak ada kamera fisik yang tersambung.</span></div>
+            <div class="sop-ts-row"><span class="k">Solusi</span><span class="v">Periksa kabel/koneksi kamera fisik ke channel NVR di lokasi. Tidak ada yang perlu diubah di aplikasi.</span></div>
+          </div>
+          <div class="sop-ts-item">
+            <div class="sop-ts-symptom">Gambar sempat muncul lalu tiba-tiba blur/pecah sesaat</div>
+            <div class="sop-ts-row"><span class="k">Penyebab</span><span class="v">Paket data sempat hilang/rusak di jalur jaringan (umum untuk kamera lewat internet publik/WAN) — bukan kerusakan kamera.</span></div>
+            <div class="sop-ts-row"><span class="k">Solusi</span><span class="v">Sistem otomatis membuang frame rusak dan melanjutkan streaming; biasanya pulih sendiri tanpa tindakan apa pun.</span></div>
+          </div>
+          <div class="sop-ts-item">
+            <div class="sop-ts-symptom">Kamera berpindah lokasi otomatis ke pin yang salah di peta</div>
+            <div class="sop-ts-row"><span class="k">Penyebab</span><span class="v">Perkiraan lokasi otomatis berbasis IP publik hanya akurat sampai level kota.</span></div>
+            <div class="sop-ts-row"><span class="k">Solusi</span><span class="v">Perbaiki manual lewat drag-pin di Peta Lokasi atau edit koordinat lokasi.</span></div>
+          </div>
+        </div>
+
+        <div class="dashboard-panel sop-section" id="sop-s12">
+          <h3>§12 Praktik Baik</h3>
+          <ul>
+            <li>Jangan bagikan satu akun ke banyak petugas — buat akun terpisah per orang agar Log Peristiwa tetap jelas siapa melakukan apa.</li>
+            <li>Cek Log Peristiwa berkala, bukan hanya saat ada masalah — event <span class="sop-code">camera_offline</span> dan <span class="sop-code">recording_error</span> yang menumpuk adalah tanda dini gangguan.</li>
+            <li>Unduh rekaman penting sebelum masa retensi habis; sistem menghapusnya otomatis tanpa pemberitahuan tambahan.</li>
+            <li>Saat menambah banyak kamera sekaligus, gunakan Import CSV alih-alih input satu-satu.</li>
+            <li>Setelah mengganti password kamera fisik, segera perbarui juga di Edit Kamera — kalau tidak, live view akan terus gagal dengan <span class="sop-code">401 Unauthorized</span>.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div id="view-health" class="hidden">
+      <div class="main-header">
+        <h2>Kesehatan Kamera</h2>
+        <div class="header-actions" id="health-range-picker">
+          <button type="button" class="chip" data-days="1">24 Jam</button>
+          <button type="button" class="chip active" data-days="7">7 Hari</button>
+          <button type="button" class="chip" data-days="30">30 Hari</button>
+        </div>
+      </div>
+
+      <div class="stat-grid" id="health-stats"></div>
+
+      <div class="table-wrap health-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Kamera</th>
+              <th>Lokasi</th>
+              <th>Status</th>
+              <th>Uptime</th>
+              <th>Downtime</th>
+              <th>Offline</th>
+              <th>Timeline</th>
+            </tr>
+          </thead>
+          <tbody id="health-trends-tbody"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -442,6 +784,117 @@
     </div>
   </div>
 </div>
+
+<div id="bulk-edit-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h3>Edit <span id="bulk-edit-count">0</span> Kamera Sekaligus</h3>
+    <p class="field-hint">Centang bagian yang mau diubah. Bagian yang <strong>tidak</strong> dicentang tidak akan disentuh — kamera terpilih tetap pakai nilai masing-masing untuk bagian itu.</p>
+
+    <div class="field bulk-edit-group">
+      <label><input id="bulk-edit-location-toggle" type="checkbox" /> 📍 Ubah Lokasi</label>
+      <div id="bulk-edit-location-fields" class="bulk-edit-subfields hidden">
+        <div class="location-field-row">
+          <select id="bulk-edit-location"><option value="">Tidak ditentukan</option></select>
+        </div>
+        <div class="field" style="margin: 10px 0 0">
+          <label>🏢 Gedung (opsional)</label>
+          <input id="bulk-edit-building" type="text" placeholder="Contoh: Gedung A, Lantai 2, dll — kosongkan untuk hapus" />
+        </div>
+      </div>
+    </div>
+
+    <div class="field bulk-edit-group">
+      <label><input id="bulk-edit-motion-toggle" type="checkbox" /> 🎯 Ubah Pengaturan Motion Detection</label>
+      <div id="bulk-edit-motion-fields" class="bulk-edit-subfields hidden">
+        <div class="field-row">
+          <div class="field">
+            <label><input id="bulk-edit-motion-enabled" type="checkbox" /> Aktifkan motion detection</label>
+          </div>
+          <div class="field">
+            <label><input id="bulk-edit-motion-recording" type="checkbox" /> Rekam saat motion</label>
+          </div>
+        </div>
+        <div class="field">
+          <label>Sensitivitas motion (0.01–0.50)</label>
+          <input id="bulk-edit-motion-sensitivity" type="number" min="0.01" max="0.5" step="0.01" value="0.04" />
+        </div>
+      </div>
+    </div>
+
+    <div class="form-msg" id="bulk-edit-msg"></div>
+    <div class="modal-actions">
+      <button class="btn secondary" id="bulk-edit-cancel-btn">Batal</button>
+      <button class="btn" id="bulk-edit-save-btn">Terapkan ke Kamera Terpilih</button>
+    </div>
+  </div>
+</div>
+
+<div id="change-password-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h3>Ganti Password</h3>
+    <div class="field">
+      <label>Password saat ini</label>
+      <input id="cp-current-password" type="password" autocomplete="current-password" />
+    </div>
+    <div class="field">
+      <label>Password baru (minimal 8 karakter)</label>
+      <input id="cp-new-password" type="password" autocomplete="new-password" />
+    </div>
+    <div class="field">
+      <label>Konfirmasi password baru</label>
+      <input id="cp-confirm-password" type="password" autocomplete="new-password" />
+    </div>
+    <div class="form-msg" id="cp-form-msg"></div>
+    <div class="modal-actions">
+      <button class="btn secondary" id="cp-cancel-btn">Batal</button>
+      <button class="btn" id="cp-save-btn">Simpan Password Baru</button>
+    </div>
+  </div>
+</div>
+
+<div id="about-modal" class="modal-overlay hidden">
+  <div class="modal about-modal">
+    <div class="about-header">
+      <div class="about-logo" id="about-logo"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4.5" fill="white" fill-opacity="0.95"/><circle cx="12" cy="12" r="1.8" fill="#4f8cff"/></svg></div>
+      <div>
+        <div class="about-app-name" id="about-app-name">Open VMS</div>
+        <div class="about-version" id="about-version">—</div>
+      </div>
+    </div>
+    <div class="about-grid" id="about-grid"></div>
+    <div class="modal-actions">
+      <button class="btn secondary" id="about-sop-btn">Lihat SOP Aplikasi</button>
+      <button class="btn" id="about-close-btn">Tutup</button>
+    </div>
+  </div>
+</div>
+
+<div id="confirm-modal" class="modal-overlay hidden">
+  <div class="modal confirm-modal">
+    <h3 id="confirm-modal-title">Konfirmasi</h3>
+    <p id="confirm-modal-message"></p>
+    <div class="modal-actions">
+      <button class="btn secondary" id="confirm-modal-cancel-btn">Batal</button>
+      <button class="btn" id="confirm-modal-confirm-btn">Ya</button>
+    </div>
+  </div>
+</div>
+
+<div id="relay-command-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <h3>Perintah Agen Relay</h3>
+    <p class="field-hint" id="relay-command-intro"></p>
+    <div class="relay-token-box">
+      <code id="relay-command-value"></code>
+      <button type="button" class="btn secondary" id="relay-command-copy-btn">Salin perintah agen</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="relay-command-close-btn">Tutup</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast-container"></div>
 
 <div id="import-modal" class="modal-overlay hidden">
   <div class="modal">

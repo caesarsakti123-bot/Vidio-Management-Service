@@ -8,4 +8,5 @@ public/streams/*
 !public/streams/.gitkeep
 public/uploads/
 .claude/
+.vscode/
 *.tmp.*

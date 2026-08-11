@@ -7,6 +7,13 @@ const DB_PATH = path.join(__dirname, '..', 'data', 'vms.db');
 const db = new Database(DB_PATH);
 
 db.pragma('journal_mode = WAL');
+// SQLite disables foreign-key enforcement per-connection by default — without
+// this, the ON DELETE CASCADE (recordings.camera_id) and ON DELETE SET NULL
+// (cameras.location_id) declared below are silently decorative: deleting a
+// camera would leave its recordings rows (and deleting a location would
+// leave its cameras' location_id) orphaned forever instead of actually
+// cascading/nulling.
+db.pragma('foreign_keys = ON');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
@@ -86,6 +93,17 @@ ensureColumn('cameras', 'is_relay', 'INTEGER DEFAULT 0');
 ensureColumn('cameras', 'relay_token', 'TEXT');
 ensureColumn('cameras', 'building', 'TEXT');
 ensureColumn('events', 'acknowledged', 'INTEGER DEFAULT 0');
+ensureColumn('events', 'actor_id', 'INTEGER');
+ensureColumn('events', 'actor_username', 'TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS idx_events_actor_id ON events(actor_id)');
+// health_routes.js's /trends query filters `WHERE type IN (camera_offline,
+// camera_online)` over the *entire* events table — it can't bound by
+// created_at the way other endpoints do (it needs each camera's last
+// transition before the window too, to know whether it was already offline
+// when the window opened), so the type filter is what needs to be cheap
+// instead. Without this, that's a full table scan of every event ever
+// logged (motion/recording/stream events included), growing forever.
+db.exec('CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(type, created_at)');
 
 function seedAdmin() {
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME || 'admin');
@@ -97,8 +115,14 @@ function seedAdmin() {
   }
 }
 
-function logEvent(cameraId, type, message) {
-  db.prepare('INSERT INTO events (camera_id, type, message) VALUES (?, ?, ?)').run(cameraId, type, message);
+// `actor` is the acting user (req.user from the verified JWT — {id, username}),
+// passed by routes that handle a deliberate user action (create/edit/delete,
+// settings changes, login) so the activity log can show who did it. System-
+// generated events (stream reconnects, health checks, scheduled purges) have
+// no actor and are left null, same as before this parameter existed.
+function logEvent(cameraId, type, message, actor = null) {
+  db.prepare('INSERT INTO events (camera_id, type, message, actor_id, actor_username) VALUES (?, ?, ?, ?, ?)')
+    .run(cameraId, type, message, actor?.id ?? null, actor?.username ?? null);
 }
 
 // password and rtsp_url (which embeds the same password) are stored
@@ -115,4 +139,4 @@ function getCameraById(id) {
   return decryptCamera(db.prepare('SELECT * FROM cameras WHERE id = ?').get(id));
 }
 
-module.exports = { db, seedAdmin, logEvent, decryptCamera, getCameraById };
+module.exports = { db, DB_PATH, seedAdmin, logEvent, decryptCamera, getCameraById };

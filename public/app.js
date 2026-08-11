@@ -15,6 +15,12 @@ const state = {
   statusFilter: null, // null | 'active' | 'inactive'
   capabilityFilter: null, // null | 'ptz' | 'motion' | 'recording' | 'relay'
   cameraSearch: '',
+  healthTrendDays: 7,
+  bulkSelectMode: false,
+  bulkSelectedIds: new Set(),
+  eventsChartDays: 14,
+  activityDays: 7,
+  activityUserFilter: '',
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -32,6 +38,112 @@ const api = async (path, opts = {}) => {
   if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
   return data;
 };
+
+// ---- Theme (light/dark) ----
+// The actual flip on page load happens in an inline <script> in index.html
+// (runs before first paint, avoids a flash of the wrong theme) — this just
+// wires the toggle button and keeps its icon/label in sync afterwards.
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('vms_theme', theme);
+  const btn = $('#theme-toggle-btn');
+  if (btn) {
+    btn.querySelector('.theme-icon-sun')?.classList.toggle('hidden', theme === 'light');
+    btn.querySelector('.theme-icon-moon')?.classList.toggle('hidden', theme !== 'light');
+    btn.title = theme === 'light' ? 'Ganti ke mode gelap' : 'Ganti ke mode terang';
+  }
+}
+
+$('#theme-toggle-btn')?.addEventListener('click', () => {
+  const current = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  applyTheme(current === 'light' ? 'dark' : 'light');
+});
+
+applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
+
+// ---- Toast notifications (replaces alert()) ----
+
+const TOAST_ICON = {
+  error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg>',
+  success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>',
+};
+
+function showToast(message, type = 'error', duration = 5000) {
+  const container = $('#toast-container');
+  if (!container) { console.error(message); return; }
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `
+    <span class="toast-icon">${TOAST_ICON[type] || TOAST_ICON.info}</span>
+    <span class="toast-message"></span>
+    <button type="button" class="toast-close" aria-label="Tutup"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+  `;
+  // Textual content set via .textContent (not the innerHTML template above)
+  // so server/error strings can never be interpreted as markup.
+  toast.querySelector('.toast-message').textContent = message;
+  container.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+  let dismissTimer = setTimeout(() => dismiss(), duration);
+  function dismiss() {
+    clearTimeout(dismissTimer);
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 200);
+  }
+  toast.querySelector('.toast-close').addEventListener('click', dismiss);
+}
+
+// ---- Confirm modal (replaces confirm()) ----
+
+function showConfirm(message, { title = 'Konfirmasi', danger = true, confirmLabel = 'Ya, lanjutkan', cancelLabel = 'Batal' } = {}) {
+  return new Promise((resolve) => {
+    const modal = $('#confirm-modal');
+    $('#confirm-modal-title').textContent = title;
+    $('#confirm-modal-message').textContent = message;
+    const confirmBtn = $('#confirm-modal-confirm-btn');
+    const cancelBtn = $('#confirm-modal-cancel-btn');
+    confirmBtn.textContent = confirmLabel;
+    confirmBtn.className = danger ? 'btn danger' : 'btn';
+    cancelBtn.textContent = cancelLabel;
+    modal.classList.remove('hidden');
+
+    function settle(result) {
+      modal.classList.add('hidden');
+      confirmBtn.removeEventListener('click', onConfirm);
+      cancelBtn.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onOverlayClick);
+      document.removeEventListener('keydown', onKeydown);
+      resolve(result);
+    }
+    function onConfirm() { settle(true); }
+    function onCancel() { settle(false); }
+    function onOverlayClick(e) { if (e.target === modal) settle(false); }
+    function onKeydown(e) { if (e.key === 'Escape') settle(false); }
+
+    confirmBtn.addEventListener('click', onConfirm);
+    cancelBtn.addEventListener('click', onCancel);
+    modal.addEventListener('click', onOverlayClick);
+    document.addEventListener('keydown', onKeydown);
+  });
+}
+
+// ---- Relay agent command (replaces prompt()) ----
+
+function showRelayCommand(cameraName, command) {
+  $('#relay-command-intro').textContent = `Perintah agen untuk "${cameraName}" — jalankan ini di PC pada jaringan lokal kamera:`;
+  $('#relay-command-value').textContent = command;
+  $('#relay-command-modal').classList.remove('hidden');
+}
+$('#relay-command-close-btn')?.addEventListener('click', () => $('#relay-command-modal').classList.add('hidden'));
+$('#relay-command-modal')?.addEventListener('click', (e) => { if (e.target.id === 'relay-command-modal') $('#relay-command-modal').classList.add('hidden'); });
+$('#relay-command-copy-btn')?.addEventListener('click', () => {
+  navigator.clipboard?.writeText($('#relay-command-value').textContent);
+  const btn = $('#relay-command-copy-btn');
+  const original = btn.textContent;
+  btn.textContent = 'Tersalin!';
+  setTimeout(() => { btn.textContent = original; }, 1500);
+});
 
 // ---- Auth ----
 
@@ -70,6 +182,11 @@ function enterApp() {
 }
 
 function logout() {
+  // Best-effort audit entry — logout should still proceed locally even if
+  // this request fails (token expired, network down, etc.).
+  if (state.token) {
+    fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${state.token}` } }).catch(() => {});
+  }
   if (state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = null;
   if (state.alertPollTimer) clearInterval(state.alertPollTimer);
@@ -89,11 +206,93 @@ function logout() {
 
 $('#logout-btn').addEventListener('click', logout);
 
+// ---- "Pengaturan" footer menu (Ganti Password / SOP / Tentang Aplikasi) ----
+// Collapsed behind one toggle instead of three permanently-stacked buttons —
+// they're occasional actions, not something worth taking sidebar space for
+// on every screen.
+
+function closeFooterSettingsMenu() {
+  $('#footer-settings-btn')?.classList.remove('open');
+  $('#footer-settings-menu')?.classList.add('hidden');
+}
+$('#footer-settings-btn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const menu = $('#footer-settings-menu');
+  if (!menu) return;
+  const opening = menu.classList.contains('hidden');
+  if (opening) {
+    $('#footer-settings-btn').classList.add('open');
+    menu.classList.remove('hidden');
+  } else {
+    closeFooterSettingsMenu();
+  }
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#footer-settings-menu') && !e.target.closest('#footer-settings-btn')) closeFooterSettingsMenu();
+});
+
+// ---- Ganti Password (self-service, semua peran) ----
+
+$('#change-password-btn')?.addEventListener('click', () => {
+  closeFooterSettingsMenu();
+  closeDrawer(); // no-op on desktop; on mobile, leaving the drawer open behind this modal looked like two screens stacked on top of each other
+  $('#cp-current-password').value = '';
+  $('#cp-new-password').value = '';
+  $('#cp-confirm-password').value = '';
+  const msg = $('#cp-form-msg');
+  msg.textContent = '';
+  msg.className = 'form-msg';
+  $('#change-password-modal').classList.remove('hidden');
+});
+$('#cp-cancel-btn')?.addEventListener('click', () => $('#change-password-modal').classList.add('hidden'));
+
+$('#cp-save-btn')?.addEventListener('click', async () => {
+  const msg = $('#cp-form-msg');
+  msg.textContent = '';
+  msg.className = 'form-msg';
+
+  const current = $('#cp-current-password').value;
+  const next = $('#cp-new-password').value;
+  const confirm = $('#cp-confirm-password').value;
+  if (!current || !next) {
+    msg.textContent = 'Password saat ini dan password baru wajib diisi.';
+    msg.classList.add('error');
+    return;
+  }
+  if (next.length < 8) {
+    msg.textContent = 'Password baru minimal 8 karakter.';
+    msg.classList.add('error');
+    return;
+  }
+  if (next !== confirm) {
+    msg.textContent = 'Konfirmasi password baru tidak cocok.';
+    msg.classList.add('error');
+    return;
+  }
+
+  try {
+    await api('/auth/change-password', { method: 'POST', body: { currentPassword: current, newPassword: next } });
+    msg.textContent = 'Password berhasil diubah.';
+    msg.classList.add('ok');
+    setTimeout(() => $('#change-password-modal').classList.add('hidden'), 900);
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('error');
+  }
+});
+
 function renderNavForRole() {
   $('#add-camera-btn').style.display = state.user.role === 'viewer' ? 'none' : 'inline-block';
-  document.querySelectorAll('.nav-item[data-view="users"], .nav-item[data-view="settings"]').forEach((item) => {
+  $('#bulk-select-toggle-btn').style.display = state.user.role === 'viewer' ? 'none' : 'inline-flex';
+  document.querySelectorAll('.nav-item[data-view="users"], .nav-item[data-view="activity"]').forEach((item) => {
     item.style.display = state.user.role === 'admin' ? 'block' : 'none';
   });
+  // "Pengaturan Sistem" moved from the main nav into the footer's
+  // "Pengaturan" menu (see index.html) — it isn't a .nav-item anymore, so
+  // it needs its own visibility toggle here instead of riding the selector
+  // above.
+  const settingsLink = $('#settings-page-link');
+  if (settingsLink) settingsLink.style.display = state.user.role === 'admin' ? 'inline-flex' : 'none';
 }
 
 // ---- Branding (app name / logo) ----
@@ -106,7 +305,7 @@ function applyBranding(data) {
   document.title = `${name} — Unified Video Management`;
 
   if (data.logo_path) {
-    const imgHtml = `<img src="${data.logo_path}" alt="${escapeHtml(name)}" />`;
+    const imgHtml = `<img src="${escapeHtml(data.logo_path)}" alt="${escapeHtml(name)}" />`;
     const sidebarMark = $('#sidebar-brand-mark');
     const loginLogo = $('#login-logo');
     if (sidebarMark) sidebarMark.innerHTML = imgHtml;
@@ -127,12 +326,18 @@ let usersCache = [];
 async function loadUsers() {
   try {
     usersCache = await api('/users');
+    // A user added/removed here must show up in the Activity tab's user
+    // filter next time it's opened — without this, activityUsersPopulated
+    // staying true (it's only ever set, never cleared) means
+    // populateActivityUserFilter() keeps skipping the refresh forever,
+    // even though usersCache itself is current.
+    activityUsersPopulated = false;
     const tbody = $('#users-table');
     if (!tbody) return;
     tbody.innerHTML = usersCache.map((user) => `
       <tr>
         <td>${escapeHtml(user.username)}</td>
-        <td>${escapeHtml(user.role)}</td>
+        <td><span class="role-badge ${escapeHtml(user.role)}">${escapeHtml(user.role)}</span></td>
         <td>${new Date(user.created_at).toLocaleString('id-ID')}</td>
         <td class="row-actions">
           <button data-user-action="edit" data-id="${user.id}">Edit</button>
@@ -148,6 +353,86 @@ async function loadUsers() {
     console.error(e);
   }
 }
+
+// ---- Aktivitas Pengguna (audit trail: who did what) ----
+
+let activityUsersPopulated = false;
+
+async function populateActivityUserFilter() {
+  if (activityUsersPopulated && usersCache.length) return;
+  try {
+    if (!usersCache.length) usersCache = await api('/users');
+    const select = $('#activity-user-filter');
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = '<option value="">Semua User</option>' + usersCache
+      .map((u) => `<option value="${u.id}">${escapeHtml(u.username)}</option>`)
+      .join('');
+    select.value = current;
+    activityUsersPopulated = true;
+  } catch (e) { console.error(e); }
+}
+
+async function loadUserActivity(days) {
+  state.activityDays = days;
+  document.querySelectorAll('#activity-range-picker .chip').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.days) === days);
+  });
+  await populateActivityUserFilter();
+  try {
+    const qs = new URLSearchParams({ days });
+    if (state.activityUserFilter) qs.set('user_id', state.activityUserFilter);
+    const data = await api(`/users/activity?${qs.toString()}`);
+    renderActivityTable(data.rows || []);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+// SQLite's CURRENT_TIMESTAMP (used for events.created_at) stores a
+// space-separated UTC string with no zone suffix ("2026-08-10 07:00:00").
+// `new Date(...)` on that exact shape is read as local time by the browser
+// instead of UTC, so an admin in WIB would see every activity-log entry
+// timestamped 7 hours later than it actually happened — force it into a
+// spec-compliant UTC string first, same fix already applied to the events
+// chart's day labels (see eventsChartDayLabel below).
+function parseServerDate(str) {
+  return new Date(`${str}`.replace(' ', 'T') + 'Z');
+}
+
+function renderActivityTable(rows) {
+  const tbody = $('#activity-tbody');
+  if (!tbody) return;
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-dim)">Belum ada aktivitas untuk filter ini.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((r) => {
+    const meta = EVENT_META[r.type] || { label: r.type, tone: 'neutral' };
+    const actorHtml = r.actor_username
+      ? `<span class="activity-user-name">${escapeHtml(r.actor_username)}</span>`
+      : `<span class="activity-system-actor">tidak dikenal</span>`;
+    return `
+      <tr>
+        <td>${parseServerDate(r.created_at).toLocaleString('id-ID')}</td>
+        <td class="activity-user-cell">${actorHtml}</td>
+        <td><span class="tone-badge tone-${meta.tone}">${escapeHtml(meta.label)}</span></td>
+        <td>${escapeHtml(r.message || '')}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+$('#activity-range-picker')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.chip');
+  if (!btn) return;
+  loadUserActivity(Number(btn.dataset.days));
+});
+
+$('#activity-user-filter')?.addEventListener('change', (e) => {
+  state.activityUserFilter = e.target.value;
+  loadUserActivity(state.activityDays);
+});
 
 let editingUserId = null;
 
@@ -175,12 +460,12 @@ async function handleUserAction(action, id) {
   if (action === 'edit') {
     openUserModal(user);
   } else if (action === 'delete') {
-    if (!confirm(`Hapus user "${user.username}"?`)) return;
+    if (!(await showConfirm(`Hapus user "${user.username}"?`, { title: 'Hapus User' }))) return;
     try {
       await api(`/users/${id}`, { method: 'DELETE' });
       await loadUsers();
     } catch (e) {
-      alert(e.message);
+      showToast(e.message);
     }
   }
 }
@@ -221,23 +506,98 @@ if (state.token) enterApp();
 
 // ---- Navigation ----
 
+const ALL_VIEWS = ['dashboard', 'live', 'map', 'recordings', 'events', 'health', 'users', 'activity', 'settings', 'sop'];
+
+function showView(viewName) {
+  ALL_VIEWS.forEach((v) => {
+    $(`#view-${v}`)?.classList.toggle('hidden', v !== viewName);
+  });
+  $('#nav-live-location')?.classList.toggle('hidden', viewName !== 'live');
+  closeLocationDropdown(); // irrelevant/stale once we've left (or re-entered) Live view
+  closeDrawer(); // no-op on desktop; on mobile the sidebar is an off-canvas drawer
+}
+
 document.querySelectorAll('.nav-item').forEach((item) => {
   item.addEventListener('click', () => {
     document.querySelectorAll('.nav-item').forEach((i) => i.classList.remove('active'));
     item.classList.add('active');
-    ['dashboard', 'live', 'map', 'recordings', 'events', 'users', 'settings'].forEach((v) => {
-      $(`#view-${v}`)?.classList.toggle('hidden', v !== item.dataset.view);
-    });
+    showView(item.dataset.view);
     if (item.dataset.view === 'dashboard') loadDashboard();
     if (item.dataset.view === 'recordings') loadRecordings();
     if (item.dataset.view === 'events') loadEvents();
+    if (item.dataset.view === 'health') loadHealthTrends(state.healthTrendDays || 7);
     if (item.dataset.view === 'users') loadUsers();
+    if (item.dataset.view === 'activity') loadUserActivity(state.activityDays || 7);
     if (item.dataset.view === 'map') showMapView();
-    if (item.dataset.view === 'settings') loadSettingsPage();
-    $('#nav-live-location')?.classList.toggle('hidden', item.dataset.view !== 'live');
-    closeLocationDropdown(); // irrelevant/stale once we've left (or re-entered) Live view
-    closeDrawer(); // no-op on desktop; on mobile the sidebar is an off-canvas drawer
   });
+});
+
+// "SOP Aplikasi" lives in the sidebar footer (next to Keluar), not the main
+// nav list, since it's reference material rather than a working area — but
+// it still swaps into the same single main content pane as every other view.
+$('#sop-link')?.addEventListener('click', () => {
+  closeFooterSettingsMenu();
+  document.querySelectorAll('.nav-item').forEach((i) => i.classList.remove('active'));
+  showView('sop');
+});
+
+// "Pengaturan Sistem" used to be its own top-level nav item; it now lives
+// in the footer's "Pengaturan" menu instead (admin-only, same as before —
+// see renderNavForRole), but still drives the same #view-settings pane and
+// needs the same loadSettingsPage() call the old nav-item click used to make.
+$('#settings-page-link')?.addEventListener('click', () => {
+  closeFooterSettingsMenu();
+  document.querySelectorAll('.nav-item').forEach((i) => i.classList.remove('active'));
+  showView('settings');
+  loadSettingsPage();
+});
+
+// ---- "Tentang Aplikasi" modal ----
+// Mirrors the sidebar branding (logo/name already loaded by loadBranding())
+// instead of re-fetching it, so this can't ever show a different name/logo
+// than the rest of the UI.
+function renderAboutGrid(data) {
+  const rows = [
+    ['Versi', data.app_version || '-'],
+    ...(data.git ? [['Build', `${data.git.commit} · ${new Date(data.git.date).toLocaleDateString('id-ID')}`]] : []),
+    ['Node.js', data.node_version || '-'],
+    ['Platform', data.platform || '-'],
+    ['Waktu Aktif', formatDuration((data.uptime_seconds || 0) * 1000)],
+    ['Jumlah Kamera', String(data.camera_count ?? '-')],
+    ['Jumlah Lokasi', String(data.location_count ?? '-')],
+    ['Ukuran Database', data.db_size_bytes != null ? formatBytes(data.db_size_bytes) : '-'],
+  ];
+  return rows.map(([label, value]) => `
+    <div class="about-row">
+      <span class="about-label">${escapeHtml(label)}</span>
+      <span class="about-value">${escapeHtml(value)}</span>
+    </div>
+  `).join('');
+}
+
+$('#about-link')?.addEventListener('click', async () => {
+  closeFooterSettingsMenu();
+  const logoHtml = $('#sidebar-brand-mark')?.innerHTML;
+  if (logoHtml) $('#about-logo').innerHTML = logoHtml;
+  $('#about-app-name').textContent = $('#sidebar-app-name')?.textContent || 'Open VMS';
+  $('#about-version').textContent = '';
+  $('#about-grid').innerHTML = '<div class="about-loading">Memuat…</div>';
+  $('#about-modal').classList.remove('hidden');
+  try {
+    const data = await api('/about');
+    $('#about-version').textContent = `v${data.app_version || '0.0.0'}`;
+    $('#about-grid').innerHTML = renderAboutGrid(data);
+  } catch (e) {
+    $('#about-grid').innerHTML = '<div class="about-loading">Gagal memuat info aplikasi.</div>';
+    console.error(e);
+  }
+});
+$('#about-close-btn')?.addEventListener('click', () => $('#about-modal').classList.add('hidden'));
+$('#about-modal')?.addEventListener('click', (e) => { if (e.target.id === 'about-modal') $('#about-modal').classList.add('hidden'); });
+$('#about-sop-btn')?.addEventListener('click', () => {
+  $('#about-modal').classList.add('hidden');
+  document.querySelectorAll('.nav-item').forEach((i) => i.classList.remove('active'));
+  showView('sop');
 });
 
 // ---- Mobile off-canvas drawer ----
@@ -337,11 +697,16 @@ const LAYOUTS = {
 
 function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
   const tile = document.createElement('div');
-  tile.className = 'tile' + (isSpotlightMain ? ' spotlight-main' : '');
-  tile.dataset.camId = cam.id;
   const canEdit = state.user.role !== 'viewer';
+  const bulkMode = state.bulkSelectMode && canEdit;
+  const isSelected = state.bulkSelectedIds.has(cam.id);
+  tile.className = 'tile' + (isSpotlightMain ? ' spotlight-main' : '') + (bulkMode ? ' bulk-selectable' : '') + (isSelected ? ' bulk-selected' : '');
+  tile.dataset.camId = cam.id;
 
-  if (enableDrag && canEdit) {
+  // Selection mode takes over drag-reorder and the "click tile to focus"
+  // gesture — trying to support both on the same click would mean guessing
+  // intent, so bulk mode wins outright while it's active.
+  if (enableDrag && canEdit && !bulkMode) {
     tile.draggable = true;
     tile.addEventListener('dragstart', (e) => {
       e.dataTransfer.effectAllowed = 'move';
@@ -368,6 +733,7 @@ function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
 
   tile.innerHTML = `
     <div class="tile-video">
+      ${bulkMode ? `<div class="bulk-select-checkbox ${isSelected ? 'checked' : ''}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>` : ''}
       <video id="video-${cam.id}" muted playsinline></video>
       <div class="placeholder ${cam.stream.active ? 'hidden' : ''}" id="placeholder-${cam.id}">${cam.rtsp_url ? (cam.stream.reconnecting ? 'Menyambung ulang...' : 'Klik "Live" untuk mulai menonton') : 'RTSP belum diatur — lakukan ONVIF probe'}</div>
       <div class="status-badge">
@@ -382,9 +748,9 @@ function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
       </button>` : ''}
     </div>
     <div class="tile-info">
-      <div>
+      <div class="tile-info-text">
         <div class="name">${escapeHtml(cam.name)} ${cam.is_relay ? '<span class="relay-badge" title="Video dikirim via agen relay, bukan konek langsung">📡 Relay</span>' : ''}</div>
-        <div class="brand">${escapeHtml(cam.brand || 'Tidak diketahui')} · ${cam.ip}</div>
+        <div class="brand">${escapeHtml(cam.brand || 'Tidak diketahui')} · ${escapeHtml(cam.ip)}</div>
         ${cam.location_id ? `<div class="location-tag">📍 ${escapeHtml(camLocation?.name || 'Lokasi tidak dikenal')}</div>` : ''}
         ${camLocation?.address ? `<div class="location-address">${escapeHtml(camLocation.address)}</div>` : ''}
         <div class="meta">Motion: ${cam.motion_detection_enabled ? 'ON' : 'OFF'} · Sensitivitas: ${cam.motion_sensitivity || 0.04}</div>
@@ -406,6 +772,10 @@ function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
 
   tile.querySelector('.tile-video').addEventListener('click', (e) => {
     if (e.target.closest('button, .drag-handle')) return;
+    if (bulkMode) {
+      toggleBulkSelection(cam.id);
+      return;
+    }
     openFocusView(cam.id);
   });
 
@@ -421,6 +791,146 @@ function buildEmptyTile(isSpotlightMain) {
   `;
   return el;
 }
+
+// ---- Bulk select (edit lokasi/motion detection untuk banyak kamera sekaligus) ----
+// Deliberately reuses renderGrid() for every selection-state change instead
+// of hand-patching the DOM — renderGrid() already knows how to preserve live
+// <video>/hls.js players across a rebuild (see the comment inside it), so
+// toggling selection doesn't interrupt anything already playing.
+
+function toggleBulkSelection(camId) {
+  if (state.bulkSelectedIds.has(camId)) state.bulkSelectedIds.delete(camId);
+  else state.bulkSelectedIds.add(camId);
+  const tile = document.querySelector(`.tile[data-cam-id="${camId}"]`);
+  if (tile) {
+    const selected = state.bulkSelectedIds.has(camId);
+    tile.classList.toggle('bulk-selected', selected);
+    tile.querySelector('.bulk-select-checkbox')?.classList.toggle('checked', selected);
+  }
+  updateBulkActionBar();
+}
+
+function updateBulkActionBar() {
+  const count = state.bulkSelectedIds.size;
+  const countEl = $('#bulk-selected-count');
+  if (countEl) countEl.textContent = `${count} kamera dipilih`;
+  const editBtn = $('#bulk-edit-open-btn');
+  if (editBtn) editBtn.disabled = count === 0;
+}
+
+function enterBulkSelectMode() {
+  state.bulkSelectMode = true;
+  state.bulkSelectedIds.clear();
+  $('#bulk-action-bar')?.classList.remove('hidden');
+  $('#bulk-select-toggle-btn')?.classList.add('active');
+  updateBulkActionBar();
+  renderGrid();
+}
+
+function exitBulkSelectMode() {
+  state.bulkSelectMode = false;
+  state.bulkSelectedIds.clear();
+  $('#bulk-action-bar')?.classList.add('hidden');
+  $('#bulk-select-toggle-btn')?.classList.remove('active');
+  renderGrid();
+}
+
+$('#bulk-select-toggle-btn')?.addEventListener('click', () => {
+  if (state.bulkSelectMode) exitBulkSelectMode();
+  else enterBulkSelectMode();
+});
+
+$('#bulk-select-cancel-btn')?.addEventListener('click', exitBulkSelectMode);
+
+// "Visible" = whatever's actually rendered under the current filter/search/
+// layout page right now, not every camera in the whole system — matches
+// what the operator can see on screen while deciding to select it all.
+$('#bulk-select-all-visible-btn')?.addEventListener('click', () => {
+  document.querySelectorAll('#camera-grid .tile[data-cam-id]').forEach((tile) => {
+    state.bulkSelectedIds.add(Number(tile.dataset.camId));
+  });
+  renderGrid();
+  updateBulkActionBar();
+});
+
+function openBulkEditModal() {
+  if (state.bulkSelectedIds.size === 0) return;
+  $('#bulk-edit-count').textContent = state.bulkSelectedIds.size;
+
+  // Always opens blank — this *sets* a value across many cameras that likely
+  // already differ from each other, it doesn't reflect any one of their
+  // current settings.
+  $('#bulk-edit-location-toggle').checked = false;
+  $('#bulk-edit-location-fields').classList.add('hidden');
+  $('#bulk-edit-location').value = '';
+  $('#bulk-edit-building').value = '';
+  $('#bulk-edit-motion-toggle').checked = false;
+  $('#bulk-edit-motion-fields').classList.add('hidden');
+  $('#bulk-edit-motion-enabled').checked = false;
+  $('#bulk-edit-motion-recording').checked = false;
+  $('#bulk-edit-motion-sensitivity').value = 0.04;
+  const msg = $('#bulk-edit-msg');
+  msg.textContent = '';
+  msg.className = 'form-msg';
+
+  const select = $('#bulk-edit-location');
+  select.innerHTML = '<option value="">Tidak ditentukan</option>' +
+    state.locations.map((l) => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
+
+  $('#bulk-edit-modal').classList.remove('hidden');
+}
+
+function closeBulkEditModal() {
+  $('#bulk-edit-modal').classList.add('hidden');
+}
+
+$('#bulk-edit-open-btn')?.addEventListener('click', openBulkEditModal);
+$('#bulk-edit-cancel-btn')?.addEventListener('click', closeBulkEditModal);
+$('#bulk-edit-location-toggle')?.addEventListener('change', (e) => {
+  $('#bulk-edit-location-fields').classList.toggle('hidden', !e.target.checked);
+});
+$('#bulk-edit-motion-toggle')?.addEventListener('change', (e) => {
+  $('#bulk-edit-motion-fields').classList.toggle('hidden', !e.target.checked);
+});
+
+$('#bulk-edit-save-btn')?.addEventListener('click', async () => {
+  const msg = $('#bulk-edit-msg');
+  msg.textContent = '';
+  msg.className = 'form-msg';
+
+  const wantLocation = $('#bulk-edit-location-toggle').checked;
+  const wantMotion = $('#bulk-edit-motion-toggle').checked;
+  if (!wantLocation && !wantMotion) {
+    msg.textContent = 'Centang minimal satu bagian yang mau diubah.';
+    msg.classList.add('error');
+    return;
+  }
+
+  const body = { ids: [...state.bulkSelectedIds] };
+  if (wantLocation) {
+    body.location_id = $('#bulk-edit-location').value ? Number($('#bulk-edit-location').value) : null;
+    body.building = $('#bulk-edit-building').value.trim() || null;
+  }
+  if (wantMotion) {
+    body.motion_detection_enabled = $('#bulk-edit-motion-enabled').checked;
+    body.motion_recording_enabled = $('#bulk-edit-motion-recording').checked;
+    body.motion_sensitivity = Number($('#bulk-edit-motion-sensitivity').value) || 0.04;
+  }
+
+  try {
+    const res = await api('/cameras/bulk', { method: 'PUT', body });
+    msg.textContent = `Berhasil memperbarui ${res.updated} kamera.`;
+    msg.classList.add('ok');
+    setTimeout(() => {
+      closeBulkEditModal();
+      exitBulkSelectMode();
+      loadCameras();
+    }, 700);
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('error');
+  }
+});
 
 // ---- Per-tile "..." action menu ----
 // A single shared popup (appended to <body>, not the tile) is reused for
@@ -691,15 +1201,15 @@ async function handleTileAction(action, id) {
 
   if (action === 'relay-info') {
     if (!cam.relay_token) {
-      alert('Token relay tidak tersedia (perlu role admin/operator untuk melihatnya).');
+      showToast('Token relay tidak tersedia (perlu role admin/operator untuk melihatnya).');
       return;
     }
     if (!cam.rtsp_url) {
-      alert(`Kamera "${cam.name}" belum punya RTSP path. Edit kamera ini dan isi RTSP path manual dulu (Probe ONVIF tidak tersedia untuk kamera relay).`);
+      showToast(`Kamera "${cam.name}" belum punya RTSP path. Edit kamera ini dan isi RTSP path manual dulu (Probe ONVIF tidak tersedia untuk kamera relay).`);
       return;
     }
     const cmd = `node relay-agent.js --server=${window.location.origin} --token=${cam.relay_token} --rtsp="${cam.rtsp_url}"`;
-    prompt(`Perintah agen untuk "${cam.name}" — jalankan ini di PC pada jaringan lokal kamera:`, cmd);
+    showRelayCommand(cam.name, cmd);
     return;
   }
 
@@ -719,7 +1229,7 @@ async function handleTileAction(action, id) {
       const info = await api(`/cameras/${id}/onvif/probe`, { method: 'POST' });
       $(`#placeholder-${id}`).textContent = `Terhubung: ${info.manufacturer || ''} ${info.model || ''}`.trim();
     } else if (action === 'delete') {
-      if (!confirm(`Hapus kamera "${cam.name}"?`)) return;
+      if (!(await showConfirm(`Hapus kamera "${cam.name}"?`, { title: 'Hapus Kamera' }))) return;
       await api(`/cameras/${id}`, { method: 'DELETE' });
     } else if (action === 'motion') {
       await api(`/cameras/${id}`, {
@@ -733,7 +1243,7 @@ async function handleTileAction(action, id) {
     }
     await loadCameras();
   } catch (e) {
-    alert(e.message);
+    showToast(e.message);
   }
 }
 
@@ -926,7 +1436,7 @@ async function handleFocusAction(action) {
     const updatedCam = state.cameras.find((c) => c.id === focusCameraId);
     if (updatedCam && !$('#focus-modal').classList.contains('hidden')) renderFocusModal(updatedCam);
   } catch (e) {
-    alert(e.message);
+    showToast(e.message);
   }
 }
 
@@ -1396,7 +1906,7 @@ function startInlineLocationRename(span) {
       await api(`/locations/${locId}`, { method: 'PUT', body: { name: newName } });
       await loadLocations();
     } catch (e) {
-      alert(e.message);
+      showToast(e.message);
       renderLocationsTable();
     }
   };
@@ -1730,6 +2240,28 @@ function initMapIfNeeded() {
   }
 }
 
+// success/warn/error/neutral by how many of a location's cameras are
+// currently live — same tone system as everywhere else in the app, so a
+// glance at the map already tells you which site needs attention before
+// opening its popup.
+function locationStatusTone(camsHere) {
+  if (camsHere.length === 0) return 'neutral';
+  const onlineCount = camsHere.filter((c) => c.stream?.active).length;
+  if (onlineCount === 0) return 'error';
+  if (onlineCount === camsHere.length) return 'success';
+  return 'warn';
+}
+
+function buildLocationMarkerIcon(tone) {
+  return L.divIcon({
+    className: 'map-marker-icon',
+    html: `<span class="map-marker-dot tone-${tone}"></span>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+    popupAnchor: [0, -9],
+  });
+}
+
 function renderMapMarkers() {
   if (!leafletMap) return;
   for (const marker of mapMarkers.values()) leafletMap.removeLayer(marker);
@@ -1738,8 +2270,11 @@ function renderMapMarkers() {
   const canEdit = state.user.role !== 'viewer';
   const bounds = [];
   for (const loc of state.locations) {
-    const camCount = state.cameras.filter((c) => c.location_id === loc.id).length;
-    const marker = L.marker([loc.lat, loc.lng], { draggable: canEdit }).addTo(leafletMap);
+    const camsHere = state.cameras.filter((c) => c.location_id === loc.id);
+    const camCount = camsHere.length;
+    const onlineCount = camsHere.filter((c) => c.stream?.active).length;
+    const tone = locationStatusTone(camsHere);
+    const marker = L.marker([loc.lat, loc.lng], { draggable: canEdit, icon: buildLocationMarkerIcon(tone) }).addTo(leafletMap);
     if (canEdit) {
       marker.on('dragend', async () => {
         const { lat, lng } = marker.getLatLng();
@@ -1756,7 +2291,7 @@ function renderMapMarkers() {
           setTimeout(() => leafletMap.closePopup(confirmPopup), 1400);
         } catch (err) {
           marker.setLatLng([prevLat, prevLng]);
-          alert(`Gagal menyimpan posisi baru: ${err.message}`);
+          showToast(`Gagal menyimpan posisi baru: ${err.message}`);
         }
       });
     }
@@ -1764,13 +2299,26 @@ function renderMapMarkers() {
     popupEl.innerHTML = `
       <div class="map-popup-title">${escapeHtml(loc.name)}</div>
       ${loc.address ? `<div class="map-popup-address">${escapeHtml(loc.address)}</div>` : ''}
-      <div class="map-popup-count">${camCount} kamera terdaftar</div>
+      <div class="map-popup-count"><span class="tone-badge tone-${tone}">${onlineCount}/${camCount} online</span></div>
+      ${camCount > 0 ? `
+        <div class="map-popup-cameras">
+          ${camsHere.map((c) => `
+            <div class="map-popup-cam-row" data-cam-id="${c.id}">
+              <span class="status-dot ${c.stream?.active ? 'online' : ''}"></span>
+              <span class="map-popup-cam-name">${escapeHtml(c.name)}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : '<div class="map-popup-empty">Belum ada kamera di lokasi ini</div>'}
       <div class="map-popup-actions">
-        <button class="primary" data-map-action="view">Lihat kamera</button>
+        <button class="primary" data-map-action="view">Lihat semua di Live view</button>
         <button data-map-action="edit">Edit</button>
         ${state.user.role === 'admin' ? `<button class="danger" data-map-action="delete">Hapus</button>` : ''}
       </div>
     `;
+    popupEl.querySelectorAll('.map-popup-cam-row').forEach((row) => {
+      row.addEventListener('click', () => openFocusView(Number(row.dataset.camId)));
+    });
     popupEl.querySelector('[data-map-action="view"]').addEventListener('click', () => goToLocationCameras(loc.id));
     popupEl.querySelector('[data-map-action="edit"]').addEventListener('click', () => openLocationModal(loc));
     popupEl.querySelector('[data-map-action="delete"]')?.addEventListener('click', () => deleteLocation(loc));
@@ -1863,18 +2411,40 @@ $('#location-save-btn')?.addEventListener('click', async () => {
 });
 
 async function deleteLocation(loc) {
-  if (!confirm(`Hapus lokasi "${loc.name}"? Kamera yang terhubung tidak akan terhapus, hanya lepas dari lokasi ini.`)) return;
+  if (!(await showConfirm(`Hapus lokasi "${loc.name}"? Kamera yang terhubung tidak akan terhapus, hanya lepas dari lokasi ini.`, { title: 'Hapus Lokasi' }))) return;
   try {
     await api(`/locations/${loc.id}`, { method: 'DELETE' });
     await loadLocations();
   } catch (e) {
-    alert(e.message);
+    showToast(e.message);
   }
 }
 
 async function loadRecordings() {
   try {
-    const rows = await api('/recordings');
+    const [rows, stats] = await Promise.all([api('/recordings'), api('/recordings/stats')]);
+
+    const statsEl = $('#recordings-stats');
+    if (statsEl) {
+      const recordingNow = state.cameras.filter((c) => c.recording_active).length;
+      const tiles = [
+        { tone: 'neutral', value: stats.count, label: 'Total file rekaman' },
+        { tone: 'info', value: formatBytes(stats.total_bytes), label: 'Total penyimpanan' },
+        { tone: 'error', value: recordingNow, label: 'Kamera sedang merekam' },
+        { tone: 'warn', value: `${stats.retention_days} hari`, label: 'Retensi otomatis' },
+      ];
+      statsEl.innerHTML = tiles.map((t) => `
+        <div class="stat-tile">
+          <div class="stat-icon tone-${t.tone}">${TONE_ICON[t.tone] || TONE_ICON.neutral}</div>
+          <div class="stat-body">
+            <div class="stat-value">${t.value}</div>
+            <div class="stat-label">${t.label}</div>
+          </div>
+        </div>
+      `).join('');
+      animateStatTiles(statsEl);
+    }
+
     const tbody = $('#recordings-table');
     if (!tbody) return;
     tbody.innerHTML = rows.map((r) => {
@@ -1905,6 +2475,39 @@ async function loadRecordings() {
   }
 }
 
+const prefersReducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+// Animates a stat-tile's leading number counting up from 0 to whatever value
+// is already in the element (set normally beforehand, HTML markup included —
+// e.g. `19.8 MB`, `80.1%`, `0<span class="stat-sub">/199</span>`). Only the
+// numeric run is touched; everything before/after it (units, suffix markup)
+// is preserved verbatim so this works across every stat-grid without each
+// caller needing its own formatting logic.
+function animateStatValue(el) {
+  if (!el || prefersReducedMotion()) return;
+  const targetHtml = el.innerHTML;
+  const match = targetHtml.match(/\d+(\.\d+)?/);
+  if (!match) return;
+  const target = parseFloat(match[0]);
+  const decimals = match[1] ? match[1].length - 1 : 0;
+  const prefix = targetHtml.slice(0, match.index);
+  const suffix = targetHtml.slice(match.index + match[0].length);
+  const duration = 650;
+  const start = performance.now();
+  function tick(now) {
+    const progress = Math.min((now - start) / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    const current = target * eased;
+    el.innerHTML = prefix + (decimals ? current.toFixed(decimals) : String(Math.round(current))) + suffix;
+    if (progress < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+function animateStatTiles(container) {
+  container?.querySelectorAll('.stat-value').forEach(animateStatValue);
+}
+
 function formatBytes(bytes) {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -1933,7 +2536,7 @@ async function downloadRecording(id, filename) {
     a.remove();
     URL.revokeObjectURL(url);
   } catch (e) {
-    alert(e.message);
+    showToast(e.message);
   }
 }
 
@@ -1975,6 +2578,7 @@ async function loadDashboard() {
     state.cameras = cameras;
     state.locations = locations;
     renderDashboard(cameras, locations, events, recStats);
+    loadEventsChart(state.eventsChartDays);
   } catch (e) {
     console.error(e);
   }
@@ -2005,6 +2609,7 @@ function renderDashboard(cameras, locations, events, recStats) {
         </div>
       </div>
     `).join('');
+    animateStatTiles(statsEl);
   }
 
   const locEl = $('#dashboard-locations');
@@ -2056,14 +2661,130 @@ function renderDashboard(cameras, locations, events, recStats) {
   }
 }
 
+// ---- Kesehatan Kamera (uptime trends) ----
+// Reachability (TCP-probe based, independent of whether anyone has the live
+// view open) is tracked server-side in the events table as camera_offline/
+// camera_online transitions; /api/health-trends turns that into per-camera
+// uptime% and downtime intervals for a chosen window instead of raw events.
+
+function formatDuration(ms) {
+  if (!ms || ms < 60000) return '< 1 menit';
+  const totalMin = Math.round(ms / 60000);
+  const days = Math.floor(totalMin / 1440);
+  const hours = Math.floor((totalMin % 1440) / 60);
+  const min = totalMin % 60;
+  const parts = [];
+  if (days) parts.push(`${days}h`);
+  if (hours) parts.push(`${hours}j`);
+  if (min && !days) parts.push(`${min}m`); // skip minutes once we're into multi-day downtime — not actionable precision
+  return parts.join(' ') || '< 1 menit';
+}
+
+// Matches the app's existing status semantics (live=green healthy, warn=amber
+// degraded, rec=red critical) rather than a generic sequential ramp — uptime
+// here is a state judgment (fine / watch / bad), not a plain magnitude.
+function uptimeTone(pct) {
+  if (pct >= 99) return 'success';
+  if (pct >= 95) return 'warn';
+  return 'error';
+}
+
+function renderHealthTimeline(intervals, windowStart, windowEnd) {
+  const totalMs = Math.max(1, windowEnd - windowStart);
+  const segs = intervals.map((iv) => {
+    const left = ((Math.max(iv.start, windowStart) - windowStart) / totalMs) * 100;
+    const width = ((Math.min(iv.end, windowEnd) - Math.max(iv.start, windowStart)) / totalMs) * 100;
+    return `<div class="health-timeline-seg" style="left:${left}%;width:${Math.max(width, 0.4)}%"></div>`;
+  }).join('');
+  return `<div class="health-timeline">${segs}</div>`;
+}
+
+async function loadHealthTrends(days) {
+  state.healthTrendDays = days;
+  document.querySelectorAll('#health-range-picker .chip').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.days) === days);
+  });
+  const tbody = $('#health-trends-tbody');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Memuat data kesehatan kamera...</td></tr>';
+  try {
+    const data = await api(`/health-trends/trends?days=${days}`);
+    renderHealthTrends(data);
+  } catch (e) {
+    console.error(e);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Gagal memuat: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderHealthTrends(data) {
+  const { cameras, window_start, window_end } = data;
+  const locMap = new Map(state.locations.map((l) => [l.id, l.name]));
+
+  const statsEl = $('#health-stats');
+  if (statsEl) {
+    const avgUptime = cameras.length ? cameras.reduce((s, c) => s + c.uptime_pct, 0) / cameras.length : 100;
+    const currentlyOffline = cameras.filter((c) => c.currently_offline).length;
+    const totalOfflineEvents = cameras.reduce((s, c) => s + c.offline_count, 0);
+    const worst = cameras.length ? [...cameras].sort((a, b) => a.uptime_pct - b.uptime_pct)[0] : null;
+
+    const tiles = [
+      { tone: uptimeTone(avgUptime), value: `${avgUptime.toFixed(1)}%`, label: 'Rata-rata uptime' },
+      { tone: currentlyOffline > 0 ? 'error' : 'success', value: currentlyOffline, label: 'Kamera offline sekarang' },
+      { tone: totalOfflineEvents > 0 ? 'warn' : 'success', value: totalOfflineEvents, label: 'Total kejadian offline' },
+      { tone: 'neutral', value: worst ? `${worst.uptime_pct.toFixed(1)}%` : '-', label: worst ? `Uptime terendah — ${worst.name}` : 'Uptime terendah' },
+    ];
+    statsEl.innerHTML = tiles.map((t) => `
+      <div class="stat-tile">
+        <div class="stat-icon tone-${t.tone}">${TONE_ICON[t.tone] || TONE_ICON.neutral}</div>
+        <div class="stat-body">
+          <div class="stat-value">${t.value}</div>
+          <div class="stat-label">${escapeHtml(String(t.label))}</div>
+        </div>
+      </div>
+    `).join('');
+    animateStatTiles(statsEl);
+  }
+
+  const tbody = $('#health-trends-tbody');
+  if (!tbody) return;
+  if (cameras.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Belum ada kamera.</td></tr>';
+    return;
+  }
+  // Worst first — the whole point of this view is spotting what needs
+  // attention, not an alphabetical camera list (Live view already has one).
+  const sorted = [...cameras].sort((a, b) => a.uptime_pct - b.uptime_pct);
+  tbody.innerHTML = sorted.map((c) => {
+    const locName = c.location_id ? (locMap.get(c.location_id) || '-') : '-';
+    const tone = uptimeTone(c.uptime_pct);
+    return `
+      <tr>
+        <td>${escapeHtml(c.name)}${c.is_relay ? ' <span class="relay-badge" title="Kamera relay">📡</span>' : ''}</td>
+        <td>${escapeHtml(locName)}</td>
+        <td><span class="health-status-badge ${c.currently_offline ? 'offline' : 'online'}"><span class="status-dot"></span>${c.currently_offline ? 'Offline' : 'Online'}</span></td>
+        <td><span class="health-uptime-pill tone-${tone}">${c.uptime_pct.toFixed(1)}%</span></td>
+        <td>${formatDuration(c.downtime_ms)}</td>
+        <td>${c.offline_count}</td>
+        <td>${renderHealthTimeline(c.intervals, window_start, window_end)}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+document.querySelectorAll('#health-range-picker .chip').forEach((btn) => {
+  btn.addEventListener('click', () => loadHealthTrends(Number(btn.dataset.days)));
+});
+
 const EVENT_META = {
   camera_added: { label: 'Kamera ditambahkan', tone: 'info', group: 'camera' },
+  camera_updated: { label: 'Kamera diperbarui', tone: 'info', group: 'camera' },
+  camera_deleted: { label: 'Kamera dihapus', tone: 'error', group: 'camera' },
   onvif_probe_ok: { label: 'ONVIF probe berhasil', tone: 'success', group: 'camera' },
   stream_started: { label: 'Live stream dimulai', tone: 'success', group: 'stream' },
   stream_stopped: { label: 'Live stream dihentikan', tone: 'neutral', group: 'stream' },
   stream_error: { label: 'Live stream error', tone: 'error', group: 'stream' },
   stream_reconnecting: { label: 'Live stream menyambung ulang', tone: 'warn', group: 'stream' },
   recording_started: { label: 'Rekaman dimulai', tone: 'success', group: 'recording' },
+  recording_resumed: { label: 'Rekaman dilanjutkan otomatis setelah restart', tone: 'info', group: 'recording' },
   recording_stopped: { label: 'Rekaman dihentikan', tone: 'neutral', group: 'recording' },
   recording_reconnecting: { label: 'Rekaman menyambung ulang', tone: 'warn', group: 'recording' },
   recording_purged: { label: 'Rekaman lama dihapus', tone: 'neutral', group: 'recording' },
@@ -2076,13 +2797,18 @@ const EVENT_META = {
   motion_detector_error: { label: 'Motion detector error', tone: 'error', group: 'motion' },
   user_created: { label: 'User dibuat', tone: 'user', group: 'user' },
   user_updated: { label: 'User diperbarui', tone: 'user', group: 'user' },
+  user_password_changed: { label: 'Password diubah sendiri', tone: 'user', group: 'user' },
   user_deleted: { label: 'User dihapus', tone: 'user', group: 'user' },
+  user_login: { label: 'Login', tone: 'success', group: 'user' },
+  user_login_failed: { label: 'Login gagal', tone: 'error', group: 'user' },
+  user_logout: { label: 'Logout', tone: 'neutral', group: 'user' },
   location_added: { label: 'Lokasi ditambahkan', tone: 'info', group: 'location' },
   location_updated: { label: 'Lokasi diperbarui', tone: 'info', group: 'location' },
   location_deleted: { label: 'Lokasi dihapus', tone: 'neutral', group: 'location' },
   camera_offline: { label: 'Kamera offline', tone: 'error', group: 'camera' },
   camera_online: { label: 'Kamera kembali online', tone: 'success', group: 'camera' },
   settings_updated: { label: 'Pengaturan diperbarui', tone: 'info', group: 'other' },
+  cameras_bulk_updated: { label: 'Kamera diperbarui massal', tone: 'info', group: 'camera' },
 };
 
 const TONE_ICON = {
@@ -2093,6 +2819,171 @@ const TONE_ICON = {
   neutral: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
   user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
 };
+
+// ---- Dashboard: "Volume Kejadian per Hari" stacked bar chart ----
+// Stacked by the same tone EVENT_META already assigns each event type (the
+// dashboard's own event-log coloring), not a separately invented palette —
+// bottom-anchored in a fixed order so the same tone always lands in the
+// same visual band day to day (color follows the entity, never its rank).
+const EVENTS_CHART_TONE_ORDER = ['error', 'warn', 'info', 'success', 'user', 'neutral'];
+const EVENTS_CHART_TONE_LABEL = { error: 'Error/Gangguan', warn: 'Peringatan', info: 'Informasi', success: 'Berhasil', user: 'User', neutral: 'Netral' };
+const EVENTS_CHART_TONE_VAR = { error: '--rec', warn: '--warn', info: '--accent', success: '--live', user: '--accent-2', neutral: '--text-faint' };
+
+function eventsChartNiceMax(value) {
+  if (value <= 0) return 1;
+  const exp = Math.floor(Math.log10(value));
+  const base = 10 ** exp;
+  const frac = value / base;
+  const niceFrac = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
+  return niceFrac * base;
+}
+
+function eventsChartDayLabel(dayStr) {
+  // Explicit UTC read + UTC format: dayStr is a plain UTC calendar date from
+  // the backend (see /api/events/summary) with no time component — letting
+  // this fall through to the browser's local timezone could shift it to the
+  // adjacent day depending on where the browser is.
+  return new Date(`${dayStr}T00:00:00Z`).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', timeZone: 'UTC' });
+}
+
+async function loadEventsChart(days) {
+  state.eventsChartDays = days;
+  document.querySelectorAll('#events-chart-range-picker .chip').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.days) === days);
+  });
+  const el = $('#events-chart');
+  if (el) el.innerHTML = '<div class="empty-state">Memuat...</div>';
+  try {
+    const data = await api(`/events/summary?days=${days}`);
+    renderEventsChart(data);
+  } catch (e) {
+    console.error(e);
+    if (el) el.innerHTML = `<div class="empty-state">Gagal memuat: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderEventsChart(data) {
+  const container = $('#events-chart');
+  if (!container) return;
+  const { days, rows } = data;
+
+  // Zero-fill every day in the window — GROUP BY only returns rows for days
+  // that actually had events, and a gap in the x-axis would otherwise read
+  // as missing data rather than "nothing happened."
+  const dayKeys = [];
+  const today = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
+    dayKeys.push(d.toISOString().slice(0, 10));
+  }
+  const byDay = new Map(dayKeys.map((k) => [k, { total: 0, byTone: {}, byType: {} }]));
+  for (const r of rows) {
+    const bucket = byDay.get(r.day);
+    if (!bucket) continue; // e.g. a day exactly on the boundary edge — skip rather than misdraw
+    const tone = (EVENT_META[r.type] && EVENT_META[r.type].tone) || 'neutral';
+    bucket.byTone[tone] = (bucket.byTone[tone] || 0) + r.count;
+    bucket.byType[r.type] = (bucket.byType[r.type] || 0) + r.count;
+    bucket.total += r.count;
+  }
+
+  const buckets = dayKeys.map((k) => byDay.get(k));
+  const maxTotal = Math.max(0, ...buckets.map((b) => b.total));
+  if (maxTotal === 0) {
+    container.innerHTML = '<div class="empty-state">Belum ada kejadian pada rentang waktu ini.</div>';
+    return;
+  }
+  const niceMax = eventsChartNiceMax(maxTotal * 1.05);
+  const presentTones = EVENTS_CHART_TONE_ORDER.filter((t) => buckets.some((b) => b.byTone[t] > 0));
+
+  const plotHeight = 190;
+  const plotTop = 12;
+  const leftMargin = 42;
+  const slotWidth = days > 20 ? 26 : days > 10 ? 32 : 40;
+  const barWidth = Math.min(28, slotWidth - 10);
+  const svgWidth = leftMargin + days * slotWidth + 8;
+  const svgHeight = plotTop + plotHeight + 34; // + x-axis label row
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const y = plotTop + plotHeight * (1 - f);
+    const value = Math.round(niceMax * f);
+    return `<line x1="${leftMargin}" y1="${y}" x2="${svgWidth - 4}" y2="${y}" class="events-chart-grid" />
+            <text x="${leftMargin - 8}" y="${y + 3}" class="events-chart-axis-label" text-anchor="end">${value}</text>`;
+  }).join('');
+
+  // Show every Nth x-axis label so they don't collide once there are more
+  // than ~12 bars on screen.
+  const labelStride = days > 20 ? 3 : days > 10 ? 2 : 1;
+
+  const bars = dayKeys.map((day, i) => {
+    const bucket = byDay.get(day);
+    const x = leftMargin + i * slotWidth + (slotWidth - barWidth) / 2;
+    let yCursor = plotTop + plotHeight;
+    const segments = EVENTS_CHART_TONE_ORDER.map((tone) => {
+      const count = bucket.byTone[tone] || 0;
+      if (count <= 0) return '';
+      const h = (count / niceMax) * plotHeight;
+      const y = yCursor - h;
+      yCursor -= h;
+      const drawH = Math.max(0, h - (presentTones.length > 1 ? 2 : 0));
+      return `<rect x="${x}" y="${y}" width="${barWidth}" height="${drawH}" rx="2" fill="var(${EVENTS_CHART_TONE_VAR[tone]})" />`;
+    }).join('');
+    const showLabel = i % labelStride === 0 || i === dayKeys.length - 1;
+    const labelX = x + barWidth / 2;
+    return `
+      <g class="events-chart-bar-group" data-day="${day}" tabindex="0">
+        <rect x="${x - (slotWidth - barWidth) / 2}" y="${plotTop}" width="${slotWidth}" height="${plotHeight}" fill="transparent" />
+        ${segments}
+        ${showLabel ? `<text x="${labelX}" y="${plotTop + plotHeight + 18}" class="events-chart-axis-label" text-anchor="middle">${eventsChartDayLabel(day)}</text>` : ''}
+      </g>
+    `;
+  }).join('');
+
+  const legend = presentTones.map((tone) => `
+    <div class="events-chart-legend-item">
+      <span class="events-chart-legend-dot" style="background:var(${EVENTS_CHART_TONE_VAR[tone]})"></span>
+      ${EVENTS_CHART_TONE_LABEL[tone]}
+    </div>
+  `).join('');
+
+  container.innerHTML = `
+    <div class="events-chart-wrap">
+      <svg viewBox="0 0 ${svgWidth} ${svgHeight}" class="events-chart-svg" preserveAspectRatio="xMinYMid meet">
+        ${gridLines}
+        ${bars}
+      </svg>
+    </div>
+    <div class="events-chart-legend">${legend}</div>
+    <div class="events-chart-tooltip hidden" id="events-chart-tooltip"></div>
+  `;
+
+  const tooltip = $('#events-chart-tooltip');
+  container.querySelectorAll('.events-chart-bar-group').forEach((g) => {
+    const bucket = byDay.get(g.dataset.day);
+    const showTooltip = (clientX, clientY) => {
+      const breakdown = EVENTS_CHART_TONE_ORDER
+        .filter((t) => bucket.byTone[t] > 0)
+        .map((t) => `<div class="events-chart-tooltip-row"><span class="events-chart-legend-dot" style="background:var(${EVENTS_CHART_TONE_VAR[t]})"></span>${EVENTS_CHART_TONE_LABEL[t]}<span class="events-chart-tooltip-count">${bucket.byTone[t]}</span></div>`)
+        .join('');
+      tooltip.innerHTML = `<div class="events-chart-tooltip-date">${eventsChartDayLabel(g.dataset.day)} — ${bucket.total} kejadian</div>${breakdown || '<div class="events-chart-tooltip-row">Tidak ada kejadian</div>'}`;
+      tooltip.classList.remove('hidden');
+      const wrapRect = container.getBoundingClientRect();
+      tooltip.style.left = `${clientX - wrapRect.left + 12}px`;
+      tooltip.style.top = `${clientY - wrapRect.top - 8}px`;
+    };
+    g.addEventListener('mouseenter', (e) => showTooltip(e.clientX, e.clientY));
+    g.addEventListener('mousemove', (e) => showTooltip(e.clientX, e.clientY));
+    g.addEventListener('mouseleave', () => tooltip.classList.add('hidden'));
+    g.addEventListener('focus', () => {
+      const r = g.querySelector('rect').getBoundingClientRect();
+      showTooltip(r.left, r.top);
+    });
+    g.addEventListener('blur', () => tooltip.classList.add('hidden'));
+  });
+}
+
+document.querySelectorAll('#events-chart-range-picker .chip').forEach((btn) => {
+  btn.addEventListener('click', () => loadEventsChart(Number(btn.dataset.days)));
+});
 
 let eventsCache = [];
 let eventsFilter = 'all';
@@ -2258,7 +3149,12 @@ $('#settings-test-email-btn')?.addEventListener('click', async () => {
 
 $('#settings-logo-file')?.addEventListener('change', async (e) => {
   const file = e.target.files[0];
-  if (!file) return;
+  const filenameEl = $('#settings-logo-filename');
+  if (!file) {
+    if (filenameEl) filenameEl.textContent = 'Belum ada file dipilih';
+    return;
+  }
+  if (filenameEl) filenameEl.textContent = file.name;
   const msg = $('#settings-logo-msg');
   msg.textContent = 'Mengupload...';
   msg.className = 'form-msg';
@@ -2358,6 +3254,12 @@ async function loadAlertPanel() {
 
 function openAlertPanel() {
   alertPanelOpen = true;
+  // On mobile the bell lives inside the off-canvas drawer — leaving the
+  // drawer open underneath would put the fixed-position, z-indexed alert
+  // panel visually on top of the (unpositioned) nav items in the same
+  // sidebar column, making the whole nav menu invisible/unreachable while
+  // notifications are shown. No-op on desktop where there's no drawer.
+  closeDrawer();
   $('#alert-panel').classList.remove('hidden');
   loadAlertPanel();
 }
@@ -2381,6 +3283,6 @@ $('#alert-ack-all-btn')?.addEventListener('click', async (e) => {
     await loadAlertPanel();
     await refreshAlertBadge();
   } catch (err) {
-    alert(err.message);
+    showToast(err.message);
   }
 });

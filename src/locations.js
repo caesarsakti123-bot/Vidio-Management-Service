@@ -19,7 +19,11 @@ router.get('/', (req, res) => {
 });
 
 router.post('/', requireRole(['admin', 'operator']), (req, res) => {
-  const { name, address, lat, lng } = req.body;
+  const { address, lat, lng } = req.body;
+  // Sanitize before checking presence — a whitespace-only name (" ") is
+  // truthy and would otherwise pass this check, then come out of
+  // sanitizeName() as '' and get stored as a nameless location.
+  const name = req.body.name ? sanitizeName(req.body.name) : '';
   if (!name || lat === undefined || lng === undefined || lat === '' || lng === '') {
     return res.status(400).json({ error: 'name, lat, dan lng wajib diisi' });
   }
@@ -30,8 +34,8 @@ router.post('/', requireRole(['admin', 'operator']), (req, res) => {
   }
 
   const info = db.prepare('INSERT INTO locations (name, address, lat, lng) VALUES (?, ?, ?, ?)')
-    .run(sanitizeName(name), address || null, latNum, lngNum);
-  logEvent(null, 'location_added', `Lokasi "${name}" ditambahkan`);
+    .run(name, address || null, latNum, lngNum);
+  logEvent(null, 'location_added', `Lokasi "${name}" ditambahkan`, req.user);
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
@@ -41,6 +45,15 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
   if (!loc) return res.status(404).json({ error: 'Lokasi tidak ditemukan' });
 
   const { name, address, lat, lng } = req.body;
+  // Distinguish "name not sent" (keep existing) from "name sent but blank
+  // after trimming" (reject) — the old `name ? sanitizeName(name) : loc.name`
+  // treated a whitespace-only name as truthy, sanitized it down to '', and
+  // stored that with no validation at all, silently blanking the location.
+  let finalName = loc.name;
+  if (name !== undefined) {
+    finalName = sanitizeName(name || '');
+    if (!finalName) return res.status(400).json({ error: 'name tidak boleh kosong' });
+  }
   const latNum = lat !== undefined && lat !== '' ? Number(lat) : loc.lat;
   const lngNum = lng !== undefined && lng !== '' ? Number(lng) : loc.lng;
   if (Number.isNaN(latNum) || Number.isNaN(lngNum)) {
@@ -48,8 +61,8 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
   }
 
   db.prepare('UPDATE locations SET name = ?, address = ?, lat = ?, lng = ? WHERE id = ?')
-    .run(name ? sanitizeName(name) : loc.name, address !== undefined ? address : loc.address, latNum, lngNum, id);
-  logEvent(null, 'location_updated', `Lokasi "${loc.name}" diperbarui`);
+    .run(finalName, address !== undefined ? address : loc.address, latNum, lngNum, id);
+  logEvent(null, 'location_updated', `Lokasi "${finalName}" diperbarui`, req.user);
   res.json({ ok: true });
 });
 
@@ -60,7 +73,7 @@ router.delete('/:id', requireRole('admin'), (req, res) => {
 
   db.prepare('UPDATE cameras SET location_id = NULL WHERE location_id = ?').run(id);
   db.prepare('DELETE FROM locations WHERE id = ?').run(id);
-  logEvent(null, 'location_deleted', `Lokasi "${loc.name}" dihapus`);
+  logEvent(null, 'location_deleted', `Lokasi "${loc.name}" dihapus`, req.user);
   res.json({ ok: true });
 });
 

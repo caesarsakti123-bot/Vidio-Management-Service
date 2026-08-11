@@ -18,7 +18,7 @@ router.post('/', (req, res) => {
 
   const hash = bcrypt.hashSync(password, 10);
   const info = db.prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)').run(username, hash, role);
-  logEvent(null, 'user_created', `User ${username} dibuat dengan role ${role}`);
+  logEvent(null, 'user_created', `User ${username} dibuat dengan role ${role}`, req.user);
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
@@ -43,7 +43,7 @@ router.put('/:id', (req, res) => {
 
   values.push(id);
   db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-  logEvent(null, 'user_updated', `User ${user.username} diperbarui`);
+  logEvent(null, 'user_updated', `User ${user.username} diperbarui`, req.user);
   res.json({ ok: true });
 });
 
@@ -52,8 +52,33 @@ router.delete('/:id', (req, res) => {
   const user = db.prepare('SELECT username FROM users WHERE id = ?').get(id);
   if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
   db.prepare('DELETE FROM users WHERE id = ?').run(id);
-  logEvent(null, 'user_deleted', `User ${user.username} dihapus`);
+  logEvent(null, 'user_deleted', `User ${user.username} dihapus`, req.user);
   res.json({ ok: true });
+});
+
+// Audit trail of who-did-what: only actor-attributed events (deliberate user
+// actions — CRUD, settings, login) plus failed-login attempts, which have no
+// actor since the credentials never resolved to a real session. Deliberately
+// excludes the high-volume system events already covered by "Log peristiwa"
+// (stream reconnects, health checks, motion triggers) so the signal here
+// stays readable.
+router.get('/activity', (req, res) => {
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+  const userId = req.query.user_id ? Number(req.query.user_id) : null;
+  const conditions = [`created_at >= datetime('now', ?)`, `(actor_id IS NOT NULL OR type = 'user_login_failed')`];
+  const params = [`-${days} days`];
+  if (userId) {
+    conditions.push('actor_id = ?');
+    params.push(userId);
+  }
+  const rows = db.prepare(`
+    SELECT id, type, message, actor_id, actor_username, created_at
+    FROM events
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY created_at DESC
+    LIMIT 300
+  `).all(...params);
+  res.json({ days, rows });
 });
 
 module.exports = router;

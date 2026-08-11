@@ -1,7 +1,7 @@
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { db, logEvent, getCameraById } = require('./db');
+const { db, logEvent, getCameraById, decryptCamera } = require('./db');
 const settings = require('./settings');
 
 const RECORDINGS_DIR = path.join(__dirname, '..', 'recordings');
@@ -205,6 +205,35 @@ function stopRecording(cameraId) {
   return true;
 }
 
+// Force-stops the recorder and resolves only once ffmpeg has actually
+// exited, unlike stopRecording() which fires SIGTERM without waiting. See
+// the matching function in streaming.js — DELETE /api/cameras/:id needs
+// this so it doesn't rm() the recordings directory while ffmpeg still has
+// the current segment file open.
+function stopRecordingAndWait(cameraId) {
+  const entry = activeRecorders.get(cameraId);
+  if (!entry) return Promise.resolve();
+  entry.stopRequested = true;
+  if (entry.reconnectTimer) {
+    clearTimeout(entry.reconnectTimer);
+    entry.reconnectTimer = null;
+  }
+  if (entry.stableTimer) clearTimeout(entry.stableTimer);
+  const proc = entry.process;
+  // A process can still be sitting on `entry` after it already exited once
+  // (mid reconnect-backoff, next spawn was just cancelled above via
+  // reconnectTimer) — its 'exit' event already fired, so kill()+once('exit')
+  // would never resolve and this would hang the DELETE request forever.
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+    activeRecorders.delete(cameraId);
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    proc.once('exit', () => resolve());
+    proc.kill('SIGTERM');
+  });
+}
+
 function isRecording(cameraId) {
   return activeRecorders.has(cameraId);
 }
@@ -262,4 +291,25 @@ function stopAll() {
   activeRecorders.clear();
 }
 
-module.exports = { startRecording, stopRecording, isRecording, startCleanupScheduler, stopAll, camDir };
+// Auto-resume recording after a server restart. motion.js already does this
+// for motion detection (its own startAllEnabled) — recording didn't: a
+// camera with recording_enabled=1 in the DB just sat idle after any restart
+// (crash, deploy, maintenance) until an operator happened to notice the gap
+// and clicked "Rekam" again by hand, silently losing footage in the
+// meantime. Staggered like streaming.js's "Nyalakan Semua" fix — starting
+// every enabled recorder at once would risk the same connection/CPU burst
+// that made already-stable live streams flap when many ffmpeg processes
+// spawn together at once.
+const RESUME_STAGGER_MS = 400;
+
+async function startAllEnabled() {
+  const rows = db.prepare('SELECT * FROM cameras WHERE recording_enabled = 1 AND rtsp_url IS NOT NULL AND is_relay = 0').all();
+  const cameras = rows.map(decryptCamera);
+  for (const cam of cameras) {
+    const started = await startRecording(cam);
+    if (started) logEvent(cam.id, 'recording_resumed', `Rekaman "${cam.name}" dilanjutkan otomatis setelah server restart`);
+    await new Promise((resolve) => setTimeout(resolve, RESUME_STAGGER_MS));
+  }
+}
+
+module.exports = { startRecording, stopRecording, stopRecordingAndWait, isRecording, startCleanupScheduler, startAllEnabled, stopAll, camDir };
