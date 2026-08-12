@@ -2024,6 +2024,28 @@ input[type="checkbox"]:checked::after {
   background: #000;
   display: block;
 }
+.player-bookmark-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.player-bookmark-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+.player-bookmark-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.player-bookmark-row .btn { white-space: nowrap; }
 
 .import-preview, .import-results {
   background: var(--panel-3);

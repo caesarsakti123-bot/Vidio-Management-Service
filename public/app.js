@@ -21,6 +21,7 @@ const state = {
   eventsChartDays: 14,
   activityDays: 7,
   activityUserFilter: '',
+  currentRecording: null, // { id, filename, cameraLabel } for whatever's open in the player modal
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -2237,37 +2238,54 @@ $('#camera-search-clear')?.addEventListener('click', () => {
   renderGrid();
 });
 
+// Shared by every sub-tab strip in the app (Peta Lokasi, Rekaman,
+// Pengaturan): swaps the `.active` class among a strip's buttons and
+// shows/hides one panel per tab, deriving each panel's id from the
+// button's own data attribute instead of a separately hand-kept tab list —
+// three near-identical copies of this loop had already drifted slightly
+// before this existed. `onSwitch` is where each caller's own side effects
+// (lazy-loading a table, initializing Leaflet, ...) still live; this helper
+// only owns the generic active/hidden toggling. Returns the activate
+// function so a caller can also trigger it programmatically (see
+// showMapView, which needs to restore whichever sub-tab was last active).
+function wireTabStrip(containerSelector, { dataAttr = 'subtab', panelId, onSwitch } = {}) {
+  const buttons = [...document.querySelectorAll(`${containerSelector} .sub-tab`)];
+  function activate(tab) {
+    buttons.forEach((btn) => {
+      const isActive = btn.dataset[dataAttr] === tab;
+      btn.classList.toggle('active', isActive);
+      $(`#${panelId(btn.dataset[dataAttr])}`)?.classList.toggle('hidden', !isActive);
+    });
+    onSwitch?.(tab);
+  }
+  buttons.forEach((btn) => btn.addEventListener('click', () => activate(btn.dataset[dataAttr])));
+  return activate;
+}
+
 let mapSubTab = 'list';
+
+const activateMapSubTab = wireTabStrip('#map-sub-tabs', {
+  panelId: (tab) => `map-subview-${tab}`,
+  onSwitch: (tab) => {
+    mapSubTab = tab;
+    if (tab === 'list') {
+      renderLocationsTable();
+    } else {
+      initMapIfNeeded();
+      // Leaflet computes tile layout from its container's size — while the
+      // map div sits under a hidden tab its size is 0, so the view must be
+      // refreshed once it's actually visible or tiles render misaligned/blank.
+      setTimeout(() => leafletMap?.invalidateSize(), 50);
+      renderMapMarkers();
+    }
+  },
+});
 
 function showMapView() {
   // Default to the "Daftar Lokasi" tab — the map (and its tile requests)
   // only initializes lazily once the user actually clicks the "Peta" tab.
-  switchMapSubTab(mapSubTab);
+  activateMapSubTab(mapSubTab);
 }
-
-function switchMapSubTab(tab) {
-  mapSubTab = tab;
-  document.querySelectorAll('#map-sub-tabs .sub-tab').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.subtab === tab);
-  });
-  $('#map-subview-list')?.classList.toggle('hidden', tab !== 'list');
-  $('#map-subview-map')?.classList.toggle('hidden', tab !== 'map');
-
-  if (tab === 'list') {
-    renderLocationsTable();
-  } else {
-    initMapIfNeeded();
-    // Leaflet computes tile layout from its container's size — while the
-    // map div sits under a hidden tab its size is 0, so the view must be
-    // refreshed once it's actually visible or tiles render misaligned/blank.
-    setTimeout(() => leafletMap?.invalidateSize(), 50);
-    renderMapMarkers();
-  }
-}
-
-document.querySelectorAll('#map-sub-tabs .sub-tab').forEach((btn) => {
-  btn.addEventListener('click', () => switchMapSubTab(btn.dataset.subtab));
-});
 
 function initMapIfNeeded() {
   if (!leafletMap && typeof L !== 'undefined') {
@@ -2581,28 +2599,130 @@ async function downloadRecording(id, filename) {
   }
 }
 
-function openPlayer(id, filename, cameraLabel) {
+// Tracks the pending loadedmetadata listener from the last openPlayer() call
+// so it can be torn down instead of leaking onto the shared #player-video
+// element — without this, closing the modal (or opening a different
+// recording) before the listener fires left it attached, and it would still
+// fire later and seek whatever video happens to be loaded next to a wrong,
+// unrelated offset.
+let playerSeekListener = null;
+
+function openPlayer(id, filename, cameraLabel, seekTo = 0) {
   const video = $('#player-video');
+  if (playerSeekListener) {
+    video.removeEventListener('loadedmetadata', playerSeekListener);
+    playerSeekListener = null;
+  }
   $('#player-title').textContent = filename;
   $('#player-subtitle').textContent = cameraLabel || '';
   video.src = `/api/recordings/${id}/stream?token=${encodeURIComponent(state.token)}`;
   $('#player-download-link').href = `/api/recordings/${id}/download?token=${encodeURIComponent(state.token)}`;
   $('#player-download-link').setAttribute('download', filename || 'recording.mp4');
+  $('#player-bookmark-note').value = '';
+  state.currentRecording = { id, filename, cameraLabel };
+  if (seekTo > 0) {
+    // currentTime can't be set until the browser knows the video's
+    // duration/seekable range — do it once loadedmetadata fires instead of
+    // racing the still-loading <video>.
+    playerSeekListener = () => { video.currentTime = seekTo; playerSeekListener = null; };
+    video.addEventListener('loadedmetadata', playerSeekListener, { once: true });
+  }
   $('#player-modal').classList.remove('hidden');
   video.play().catch(() => {});
 }
 
 function closePlayer() {
   const video = $('#player-video');
+  if (playerSeekListener) {
+    video.removeEventListener('loadedmetadata', playerSeekListener);
+    playerSeekListener = null;
+  }
   video.pause();
   video.removeAttribute('src');
   video.load();
+  state.currentRecording = null;
   $('#player-modal').classList.add('hidden');
 }
 
 $('#player-close-btn')?.addEventListener('click', closePlayer);
 $('#player-modal')?.addEventListener('click', (e) => {
   if (e.target.id === 'player-modal') closePlayer();
+});
+
+// ---- Bookmarks ----
+
+$('#player-bookmark-btn')?.addEventListener('click', async () => {
+  const recording = state.currentRecording;
+  const video = $('#player-video');
+  const note = $('#player-bookmark-note').value.trim();
+  if (!recording) return;
+  if (!note) { showToast('Isi catatan bookmark dulu'); return; }
+  try {
+    await api('/bookmarks', {
+      method: 'POST',
+      body: { recording_id: recording.id, offset_seconds: video.currentTime, note },
+    });
+    $('#player-bookmark-note').value = '';
+    showToast('Bookmark ditambahkan', 'success');
+    if (!$('#recordings-subview-bookmarks').classList.contains('hidden')) loadBookmarks();
+  } catch (e) {
+    showToast(e.message);
+  }
+});
+
+async function loadBookmarks() {
+  try {
+    const rows = await api('/bookmarks');
+    const tbody = $('#bookmarks-table');
+    if (!tbody) return;
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-dim)">Belum ada bookmark.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map((b) => {
+      const cam = state.cameras.find((c) => c.id === b.camera_id);
+      const camLabel = cam ? cam.name : `Kamera #${b.camera_id}`;
+      return `
+        <tr>
+          <td>${escapeHtml(camLabel)}</td>
+          <td>${parseServerDate(b.occurred_at).toLocaleString('id-ID')}</td>
+          <td>${escapeHtml(b.note)}</td>
+          <td>${escapeHtml(b.created_by_username || 'tidak dikenal')}</td>
+          <td class="row-actions">
+            <button data-bookmark-action="play" data-id="${b.id}">Putar</button>
+            ${(state.user.role === 'admin' || b.created_by === state.user.id) ? `<button class="danger" data-bookmark-action="delete" data-id="${b.id}">Hapus</button>` : ''}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('[data-bookmark-action="play"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const b = rows.find((r) => r.id === Number(btn.dataset.id));
+        if (!b) return;
+        const cam = state.cameras.find((c) => c.id === b.camera_id);
+        openPlayer(b.recording_id, b.filename, cam ? cam.name : `Kamera #${b.camera_id}`, b.offset_seconds);
+      });
+    });
+    tbody.querySelectorAll('[data-bookmark-action="delete"]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!(await showConfirm('Hapus bookmark ini?', { title: 'Hapus Bookmark' }))) return;
+        try {
+          await api(`/bookmarks/${btn.dataset.id}`, { method: 'DELETE' });
+          loadBookmarks();
+        } catch (e) {
+          showToast(e.message);
+        }
+      });
+    });
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+wireTabStrip('#recordings-sub-tabs', {
+  panelId: (tab) => `recordings-subview-${tab}`,
+  onSwitch: (tab) => { if (tab === 'bookmarks') loadBookmarks(); },
 });
 
 // ---- Dashboard ----
@@ -2850,6 +2970,8 @@ const EVENT_META = {
   camera_online: { label: 'Kamera kembali online', tone: 'success', group: 'camera' },
   settings_updated: { label: 'Pengaturan diperbarui', tone: 'info', group: 'other' },
   cameras_bulk_updated: { label: 'Kamera diperbarui massal', tone: 'info', group: 'camera' },
+  bookmark_added: { label: 'Bookmark ditambahkan', tone: 'success', group: 'recording' },
+  bookmark_deleted: { label: 'Bookmark dihapus', tone: 'neutral', group: 'recording' },
 };
 
 const TONE_ICON = {
@@ -3081,14 +3203,9 @@ $('#event-filters')?.addEventListener('click', (e) => {
 
 // ---- Pengaturan (Settings) ----
 
-document.querySelectorAll('#settings-sub-tabs .sub-tab').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('#settings-sub-tabs .sub-tab').forEach((b) => b.classList.toggle('active', b === btn));
-    const tab = btn.dataset.settingsTab;
-    ['branding', 'email', 'recording', 'performance', 'healthcheck'].forEach((t) => {
-      $(`#settings-tab-${t}`)?.classList.toggle('hidden', t !== tab);
-    });
-  });
+wireTabStrip('#settings-sub-tabs', {
+  dataAttr: 'settingsTab',
+  panelId: (tab) => `settings-tab-${tab}`,
 });
 
 async function loadSettingsPage() {

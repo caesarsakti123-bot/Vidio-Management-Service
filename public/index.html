@@ -299,11 +299,28 @@
     <div id="view-recordings" class="hidden">
       <div class="main-header"><h2>Rekaman</h2></div>
       <div class="stat-grid" id="recordings-stats"></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Kamera</th><th>File</th><th>Mulai</th><th>Ukuran</th><th></th></tr></thead>
-          <tbody id="recordings-table"></tbody>
-        </table>
+
+      <div class="sub-tabs" id="recordings-sub-tabs">
+        <button class="sub-tab active" data-subtab="list">Daftar Rekaman</button>
+        <button class="sub-tab" data-subtab="bookmarks">Bookmark</button>
+      </div>
+
+      <div id="recordings-subview-list">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Kamera</th><th>File</th><th>Mulai</th><th>Ukuran</th><th></th></tr></thead>
+            <tbody id="recordings-table"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="recordings-subview-bookmarks" class="hidden">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Kamera</th><th>Waktu</th><th>Catatan</th><th>Dibuat oleh</th><th></th></tr></thead>
+            <tbody id="bookmarks-table"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -928,6 +945,15 @@
       <button class="btn secondary" id="player-close-btn">Tutup</button>
     </div>
     <video id="player-video" controls></video>
+
+    <div class="player-bookmark-row">
+      <input type="text" id="player-bookmark-note" placeholder="Catatan bookmark untuk posisi video saat ini..." maxlength="500" />
+      <button class="btn secondary" id="player-bookmark-btn" type="button">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+        Bookmark
+      </button>
+    </div>
+
     <div class="modal-actions">
       <a class="btn secondary" id="player-download-link" download>Unduh file ini</a>
     </div>

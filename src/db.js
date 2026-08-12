@@ -73,6 +73,26 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- A marked moment inside one recording file (camera_id/occurred_at are
+-- denormalized off recording_id purely so listing/filtering bookmarks
+-- doesn't need a JOIN on the hot path). ON DELETE CASCADE on both FKs is
+-- deliberate: a bookmark pointing at a camera or recording that no longer
+-- exists (camera deleted, file purged by retention) is dead weight, not
+-- evidence worth keeping — there's no video left for it to point into.
+CREATE TABLE IF NOT EXISTS bookmarks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  camera_id INTEGER NOT NULL,
+  recording_id INTEGER NOT NULL,
+  offset_seconds REAL NOT NULL DEFAULT 0,
+  occurred_at TEXT NOT NULL,
+  note TEXT NOT NULL,
+  created_by INTEGER,
+  created_by_username TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE,
+  FOREIGN KEY(recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
 `);
 
 function ensureColumn(table, name, definition) {
@@ -104,6 +124,8 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_events_actor_id ON events(actor_id)');
 // instead. Without this, that's a full table scan of every event ever
 // logged (motion/recording/stream events included), growing forever.
 db.exec('CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(type, created_at)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_bookmarks_camera_id ON bookmarks(camera_id)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_bookmarks_recording_id ON bookmarks(recording_id)');
 
 function seedAdmin() {
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME || 'admin');

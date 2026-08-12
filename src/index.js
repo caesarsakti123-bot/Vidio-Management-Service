@@ -21,6 +21,7 @@ const recording = require('./recording');
 const motion = require('./motion');
 const healthcheck = require('./healthcheck');
 const healthTrendsRouter = require('./health_routes');
+const bookmarksRouter = require('./bookmarks');
 
 seedAdmin();
 recording.startCleanupScheduler();
@@ -79,6 +80,7 @@ app.use('/streams', express.static(path.join(__dirname, '..', 'public', 'streams
 // Protected API
 app.use('/api/cameras', requireAuth, camerasRouter);
 app.use('/api/recordings', requireAuth, recordingsRouter);
+app.use('/api/bookmarks', requireAuth, bookmarksRouter);
 app.use('/api/users', requireAuth, requireRole('admin'), usersRouter);
 app.use('/api/locations', requireAuth, locationsRouter);
 app.use('/api/settings', requireAuth, requireRole('admin'), settingsRouter);
