@@ -179,6 +179,7 @@ function enterApp() {
   refreshAlertBadge();
   if (state.alertPollTimer) clearInterval(state.alertPollTimer);
   state.alertPollTimer = setInterval(refreshAlertBadge, 20000);
+  resetIdleLogoutTimer();
 }
 
 function logout() {
@@ -187,6 +188,7 @@ function logout() {
   if (state.token) {
     fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${state.token}` } }).catch(() => {});
   }
+  stopIdleLogoutTimer();
   if (state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = null;
   if (state.alertPollTimer) clearInterval(state.alertPollTimer);
@@ -205,6 +207,45 @@ function logout() {
 }
 
 $('#logout-btn').addEventListener('click', logout);
+
+// ---- Idle auto-logout ----
+// A live-view wall is meant to be left open unattended showing video (see
+// the reconnect-forever comments elsewhere in this file) — but an
+// unattended *logged-in* session is this app's biggest single exposure
+// (camera credentials, RTSP URLs, user management, settings all sit behind
+// just this one token). Log out automatically after this long with zero
+// user interaction, same as any banking/admin-panel session timeout.
+// Admins can reach user management/settings/credentials, so they get a
+// tighter window; operators/viewers are mostly just watching the live-view
+// wall, so a short timeout would log out exactly the people meant to be
+// able to leave it open.
+const IDLE_LOGOUT_MS_BY_ROLE = {
+  admin: 10 * 60 * 1000,
+  operator: 60 * 60 * 1000,
+  viewer: 60 * 60 * 1000,
+};
+const IDLE_LOGOUT_MS_DEFAULT = IDLE_LOGOUT_MS_BY_ROLE.operator;
+let idleLogoutTimer = null;
+
+function resetIdleLogoutTimer() {
+  if (!state.token) return;
+  clearTimeout(idleLogoutTimer);
+  const ms = IDLE_LOGOUT_MS_BY_ROLE[state.user.role] ?? IDLE_LOGOUT_MS_DEFAULT;
+  idleLogoutTimer = setTimeout(() => {
+    logout();
+    showToast(`Sesi berakhir karena tidak ada aktivitas selama ${Math.round(ms / 60000)} menit.`, 'info');
+  }, ms);
+}
+function stopIdleLogoutTimer() {
+  clearTimeout(idleLogoutTimer);
+  idleLogoutTimer = null;
+}
+// capture: true so this still counts as activity even if some inner handler
+// calls stopPropagation() on its way up — a scroll/click inside a modal
+// should reset the timer just as much as one on the sidebar.
+['mousedown', 'mousemove', 'keydown', 'wheel', 'scroll', 'touchstart'].forEach((evt) => {
+  document.addEventListener(evt, resetIdleLogoutTimer, { passive: true, capture: true });
+});
 
 // ---- "Pengaturan" footer menu (Ganti Password / SOP / Tentang Aplikasi) ----
 // Collapsed behind one toggle instead of three permanently-stacked buttons —
