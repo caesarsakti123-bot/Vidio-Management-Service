@@ -2536,6 +2536,58 @@ async function loadRecordings() {
 
 const prefersReducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
+// ---- 3D hover tilt (camera tiles & stat tiles) ----
+// Cursor position within the card maps to a small rotateX/rotateY, released
+// back to flat on mouseleave — a cheap depth cue that was the other half of
+// "light mode feels flat" (the color/gradient tweaks above only address the
+// palette, not the interaction). Delegated on `document` instead of binding
+// per-element: .tile/.stat-tile grids are re-rendered via innerHTML swaps
+// constantly (renderGrid, loadDashboard, ...), so per-element listeners
+// would mean re-binding every render or leaking onto discarded nodes.
+(() => {
+  const TILT_SELECTOR = '.tile, .stat-tile';
+  let tiltEl = null;
+  let tiltFrame = null;
+
+  function resetTilt(el) {
+    if (el) el.style.transform = '';
+  }
+
+  document.addEventListener('mousemove', (e) => {
+    if (prefersReducedMotion()) return;
+    const el = e.target.closest(TILT_SELECTOR);
+    if (el !== tiltEl) {
+      resetTilt(tiltEl);
+      tiltEl = el;
+    }
+    if (!el) return;
+
+    const clientX = e.clientX;
+    const clientY = e.clientY;
+    if (tiltFrame) return; // an update is already queued for this frame
+    tiltFrame = requestAnimationFrame(() => {
+      tiltFrame = null;
+      const rect = el.getBoundingClientRect();
+      const px = (clientX - rect.left) / rect.width;
+      const py = (clientY - rect.top) / rect.height;
+      // Camera tiles are the bigger visual anchor and read fine with a more
+      // dramatic tilt; stat tiles are smaller/text-heavy, so a subtler
+      // angle keeps their numbers legible instead of swimming around.
+      const isTile = el.classList.contains('tile');
+      const max = isTile ? 11 : 6;
+      const rotateY = (px - 0.5) * max * 2;
+      const rotateX = (0.5 - py) * max * 2;
+      const scale = isTile ? 1.035 : 1.02;
+      el.style.transform = `perspective(900px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) scale(${scale}) translateY(-4px)`;
+    });
+  }, { passive: true });
+
+  // mouseleave doesn't bubble, but binding it directly on `document` still
+  // fires once when the pointer exits the whole viewport — the one case the
+  // closest()-swap logic above can't catch on its own.
+  document.addEventListener('mouseleave', () => { resetTilt(tiltEl); tiltEl = null; });
+})();
+
 // Animates a stat-tile's leading number counting up from 0 to whatever value
 // is already in the element (set normally beforehand, HTML markup included —
 // e.g. `19.8 MB`, `80.1%`, `0<span class="stat-sub">/199</span>`). Only the
@@ -2778,20 +2830,42 @@ function renderDashboard(cameras, locations, events, recStats) {
     if (locations.length === 0) {
       locEl.innerHTML = '<div class="empty-state">Belum ada lokasi. Tambahkan di menu Peta Lokasi.</div>';
     } else {
-      locEl.innerHTML = locations.map((loc) => {
+      // Column order per request: kamera aktif/off, lokasi kamera, jumlah
+      // kamera per lokasi, lalu "kesehatan" — there's no real battery
+      // telemetry anywhere in this app (these are IP/RTSP cameras, not
+      // battery-powered devices), so that last column reuses the same
+      // online-ratio already computed here, just framed as a health score
+      // instead of a bare online count.
+      const rows = locations.map((loc) => {
         const camsHere = cameras.filter((c) => c.location_id === loc.id);
         const onlineHere = camsHere.filter((c) => c.stream.active).length;
+        const offlineHere = camsHere.length - onlineHere;
         const pct = camsHere.length ? Math.round((onlineHere / camsHere.length) * 100) : 0;
+        const healthTone = pct >= 80 ? 'good' : pct >= 40 ? 'warn' : 'bad';
         return `
           <div class="location-status-row" data-loc-id="${loc.id}">
-            <div class="location-status-info">
-              <div class="location-status-name">${escapeHtml(loc.name)}</div>
-              <div class="location-status-meta">${onlineHere}/${camsHere.length} kamera online</div>
+            <div class="location-status-counts">
+              <span class="location-count-pill online"><span class="dot"></span>${onlineHere} aktif</span>
+              <span class="location-count-pill offline"><span class="dot"></span>${offlineHere} off</span>
             </div>
-            <div class="location-status-bar"><div class="location-status-fill" style="width:${pct}%"></div></div>
+            <div class="location-status-name">${escapeHtml(loc.name)}</div>
+            <div class="location-status-count-text">${camsHere.length} kamera di ${escapeHtml(loc.name)}</div>
+            <div class="location-status-health">
+              <div class="location-status-bar"><div class="location-status-fill tone-${healthTone}" style="width:${pct}%"></div></div>
+              <span class="location-status-pct tone-${healthTone}">${pct}%</span>
+            </div>
           </div>
         `;
       }).join('');
+      locEl.innerHTML = `
+        <div class="location-status-header">
+          <span>Aktif/Off</span>
+          <span>Lokasi</span>
+          <span>Jumlah Kamera</span>
+          <span>Kesehatan</span>
+        </div>
+        ${rows}
+      `;
       locEl.querySelectorAll('[data-loc-id]').forEach((row) => {
         row.addEventListener('click', () => goToLocationCameras(Number(row.dataset.locId)));
       });
