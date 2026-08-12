@@ -198,14 +198,14 @@ select:focus-visible,
   50% { background-position: 100% 100%; }
 }
 .login-logo {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
+  width: 96px;
+  height: 96px;
+  border-radius: 22px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 0 auto 18px;
+  margin: 0 auto 20px;
   box-shadow: 0 8px 20px rgba(79, 140, 255, 0.35);
   animation: loginLogoPulse 2.6s ease-in-out infinite;
 }
@@ -213,8 +213,8 @@ select:focus-visible,
   0%, 100% { box-shadow: 0 8px 20px rgba(79, 140, 255, 0.35); }
   50% { box-shadow: 0 10px 28px rgba(124, 92, 255, 0.55); }
 }
-.login-logo svg { width: 26px; height: 26px; }
-.login-logo img { width: 100%; height: 100%; object-fit: contain; border-radius: 14px; }
+.login-logo svg { width: 48px; height: 48px; }
+.login-logo img { width: 100%; height: 100%; object-fit: contain; border-radius: 22px; }
 .login-box h1 {
   font-size: 22px;
   font-weight: 700;
