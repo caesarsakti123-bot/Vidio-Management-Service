@@ -1,5 +1,6 @@
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { logEvent, getCameraById } = require('./db');
 const settings = require('./settings');
@@ -65,8 +66,61 @@ let qsvKnownUnavailable = false;
 const QSV_CONCURRENCY_LIMIT = Number(process.env.QSV_CONCURRENCY_LIMIT) || 3;
 let activeQsvCount = 0;
 
+// Software (libx264) has no hardware session ceiling like QSV does, but it
+// still runs on real CPU cores that are just as finite — the "no such
+// session ceiling" reasoning above only means ffmpeg won't refuse to start
+// a 115th software encode, not that the box can actually run 115 of them.
+// On a 1-vCPU host, "Nyalakan Semua" (Start All) firing stream/start for
+// ~199 cameras drove load average past 100 and starved the Node process
+// itself of CPU (health checks, the API, even PM2's own polling), which is
+// what made the whole dashboard "lemot" rather than just the video feeds.
+// Cap concurrent software encodes the same way QSV is capped: once the
+// limit is hit, additional stream requests queue instead of spawning
+// immediately, and get picked up as soon as a running stream's slot frees.
+// Scales with actual core count so the same code doesn't need retuning
+// per-deployment; override with SOFTWARE_CONCURRENCY_LIMIT if the
+// empirical sweet spot for a given host differs.
+const SOFTWARE_CONCURRENCY_LIMIT = Number(process.env.SOFTWARE_CONCURRENCY_LIMIT) || Math.max(2, os.cpus().length * 3);
+let activeSoftwareCount = 0;
+// FIFO of { camera, entry } waiting for a software encode slot to free up.
+const softwareQueue = [];
+
+function drainSoftwareQueue() {
+  while (softwareQueue.length > 0 && activeSoftwareCount < SOFTWARE_CONCURRENCY_LIMIT) {
+    const { camera, entry } = softwareQueue.shift();
+    if (entry.stopRequested || !activeStreams.has(camera.id)) continue;
+    // Re-fetch: credentials/settings may have changed while this camera sat
+    // in queue, same reasoning as the reconnect-timer re-fetch below.
+    const fresh = getCameraById(camera.id) || camera;
+    spawnEncoder(fresh, entry, 'x264');
+  }
+}
+
 function streamDirFor(cameraId) {
   return path.join(STREAMS_DIR, String(cameraId));
+}
+
+// -hls_flags delete_segments only prunes segments *this* ffmpeg process
+// wrote, as its own rolling window advances — it has no idea a previous
+// process ever wrote into the same directory. Every stop/reconnect (viewer
+// closes and reopens, a dropped RTSP link, QSV falling back to x264, a
+// server restart) starts a brand new process whose segment counter begins
+// over, so without this, every past process this camera ever had leaves
+// its last few segments behind forever, unreferenced by the current
+// index.m3u8 and never cleaned up until the camera itself is deleted. Only
+// .ts/.m3u8 are touched — nothing else is ever written into this directory.
+function clearStreamDir(dir) {
+  let files;
+  try {
+    files = fs.readdirSync(dir);
+  } catch (_err) {
+    return; // doesn't exist yet — nothing to clear
+  }
+  for (const f of files) {
+    if (f.endsWith('.ts') || f.endsWith('.m3u8')) {
+      try { fs.unlinkSync(path.join(dir, f)); } catch (_err) { /* already gone, fine */ }
+    }
+  }
 }
 
 const HLS_SEGMENT_SECONDS = 2;
@@ -155,9 +209,30 @@ function preferredEncoder() {
 }
 
 function spawnEncoder(camera, entry, encoder) {
+  // Software slot check happens before anything else spawns/allocates —
+  // if the box is already at SOFTWARE_CONCURRENCY_LIMIT, park this camera
+  // in the queue instead of starting a 115th ffmpeg process. It gets
+  // re-dispatched through this same function once a slot frees (see
+  // drainSoftwareQueue), so everything below this point can assume the
+  // slot is actually available.
+  if (encoder === 'x264' && activeSoftwareCount >= SOFTWARE_CONCURRENCY_LIMIT) {
+    entry.alive = false;
+    entry.reconnecting = true;
+    if (!entry.queued) {
+      entry.queued = true;
+      lastErrorByCamera.set(camera.id, `Menunggu slot software encoder tersedia (${SOFTWARE_CONCURRENCY_LIMIT} sedang dipakai)`);
+      logEvent(camera.id, 'stream_reconnecting', `Live stream mengantre — batas ${SOFTWARE_CONCURRENCY_LIMIT} software encoder bersamaan sedang penuh`);
+    }
+    softwareQueue.push({ camera, entry });
+    return;
+  }
+  entry.queued = false;
+
   const dir = streamDirFor(camera.id);
   const playlistPath = path.join(dir, 'index.m3u8');
   const args = buildArgs(camera, dir, playlistPath, encoder);
+
+  clearStreamDir(dir);
 
   // windowsHide: without it, Windows pops up a console window for every
   // ffmpeg process — very noticeable with many cameras + auto-reconnect
@@ -170,18 +245,30 @@ function spawnEncoder(camera, entry, encoder) {
   const startedAt = Date.now();
   let fellBack = false;
 
-  // Claim a QSV concurrency slot for the lifetime of this specific process;
+  // Claim a concurrency slot for the lifetime of this specific process;
   // released exactly once no matter which way this particular process ends
   // (crash, clean exit, fallback, stop) so the count never leaks or double-frees.
   let usingQsvSlot = false;
+  let usingSoftwareSlot = false;
   if (encoder === 'qsv') {
     activeQsvCount += 1;
     usingQsvSlot = true;
+  } else {
+    activeSoftwareCount += 1;
+    usingSoftwareSlot = true;
   }
   function releaseQsvSlot() {
     if (usingQsvSlot) {
       activeQsvCount = Math.max(0, activeQsvCount - 1);
       usingQsvSlot = false;
+    }
+  }
+  function releaseSoftwareSlot() {
+    if (usingSoftwareSlot) {
+      activeSoftwareCount = Math.max(0, activeSoftwareCount - 1);
+      usingSoftwareSlot = false;
+      // Someone else may have been waiting on exactly this slot.
+      drainSoftwareQueue();
     }
   }
 
@@ -195,6 +282,7 @@ function spawnEncoder(camera, entry, encoder) {
 
   proc.on('error', (err) => {
     releaseQsvSlot();
+    releaseSoftwareSlot();
     entry.alive = false;
     activeStreams.delete(camera.id);
     logEvent(camera.id, 'stream_error', `Gagal menjalankan ffmpeg: ${err.message}`);
@@ -210,6 +298,7 @@ function spawnEncoder(camera, entry, encoder) {
 
   proc.on('exit', (code) => {
     releaseQsvSlot();
+    releaseSoftwareSlot();
     entry.alive = false;
     if (entry.stableTimer) clearTimeout(entry.stableTimer);
     const ranMs = Date.now() - startedAt;
@@ -344,6 +433,7 @@ function getStatus(cameraId) {
   return {
     active: entry ? entry.alive : false,
     reconnecting: entry ? !!entry.reconnecting : false,
+    queued: entry ? !!entry.queued : false,
     viewers: entry ? entry.viewers : 0,
     encoder: entry ? entry.encoder : null,
     lastError: lastErrorByCamera.get(cameraId) || null
