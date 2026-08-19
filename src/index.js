@@ -21,6 +21,7 @@ const recording = require('./recording');
 const motion = require('./motion');
 const healthcheck = require('./healthcheck');
 const healthTrendsRouter = require('./health_routes');
+const systemHealthRouter = require('./system_health');
 const bookmarksRouter = require('./bookmarks');
 
 seedAdmin();
@@ -83,6 +84,15 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 
 // HLS live-stream segments (served publicly since they're short-lived/ephemeral;
 // put behind auth/reverse-proxy in production if streams are sensitive)
+// Every real playlist/segment fetch marks that camera+profile's stream as
+// "still being watched" — streaming.js's idle sweep uses this (not the
+// viewer refcount, which a crashed/closed tab never decrements) to decide
+// when a stream has actually gone unwatched long enough to force-stop.
+app.use('/streams', (req, res, next) => {
+  const m = req.path.match(/^\/(\d+)(\/sub)?\//);
+  if (m) streaming.touchStream(Number(m[1]), m[2] ? 'sub' : 'main');
+  next();
+});
 app.use('/streams', express.static(path.join(__dirname, '..', 'public', 'streams')));
 
 // Protected API
@@ -94,6 +104,7 @@ app.use('/api/locations', requireAuth, locationsRouter);
 app.use('/api/settings', requireAuth, requireRole('admin'), settingsRouter);
 app.use('/api/alerts', requireAuth, alertsRouter);
 app.use('/api/health-trends', requireAuth, healthTrendsRouter);
+app.use('/api/system-health', requireAuth, requireRole('admin'), systemHealthRouter);
 
 app.get('/api/events', requireAuth, (req, res) => {
   const rows = db.prepare('SELECT * FROM events ORDER BY created_at DESC LIMIT 100').all();

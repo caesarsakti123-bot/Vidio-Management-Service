@@ -1150,6 +1150,7 @@ select:focus-visible,
   padding: 12px;
   pointer-events: none;
 }
+.tile-video .placeholder.placeholder-error { color: var(--warn); }
 .status-badge {
   position: absolute;
   top: 10px;
@@ -2295,6 +2296,7 @@ input[type="checkbox"]:checked::after {
 }
 .focus-video-wrap video { width: 100%; height: 100%; object-fit: contain; }
 .focus-video-wrap .placeholder { color: var(--text-faint); font-size: 13px; }
+.focus-video-wrap .placeholder.placeholder-error { color: var(--warn); }
 .focus-modal .ptz-grid { max-width: 200px; margin: 12px auto 0; padding: 0; }
 .tile-video { cursor: zoom-in; }
 .player-modal-header {
@@ -2376,6 +2378,61 @@ input[type="checkbox"]:checked::after {
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   transition: width 0.2s ease;
 }
+
+/* ---- "Kesehatan Server" (CPU/RAM) ---- */
+.sys-sampled-at { font-size: 12px; color: var(--text-faint); }
+.sys-meter-row { display: flex; align-items: center; gap: 12px; }
+.sys-meter {
+  flex: 1;
+  height: 10px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.sys-meter-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.3s ease, background-color 0.3s ease;
+  background: var(--live);
+}
+.sys-meter-fill.tone-success { background: var(--live); }
+.sys-meter-fill.tone-warn { background: var(--warn); }
+.sys-meter-fill.tone-error { background: var(--rec); }
+.sys-meter-value {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: right;
+}
+.sys-core-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 16px;
+  margin-top: 16px;
+}
+.sys-core-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sys-core-bar {
+  flex: 1;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.sys-core-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease, background-color 0.3s ease;
+}
+.sys-core-fill.tone-success { background: var(--live); }
+.sys-core-fill.tone-warn { background: var(--warn); }
+.sys-core-fill.tone-error { background: var(--rec); }
+.sys-core-label { width: 16px; flex-shrink: 0; font-size: 10px; color: var(--text-faint); text-align: right; }
+.sys-mem-detail { margin-top: 10px; font-size: 12.5px; color: var(--text-dim); }
 
 /* ---- Responsive ---- */
 html, body { overflow-x: hidden; } /* belt-and-suspenders: nothing should be able to push the page sideways */
@@ -2524,6 +2581,12 @@ html, body { overflow-x: hidden; } /* belt-and-suspenders: nothing should be abl
 }
 
 /* ---- Kesehatan Kamera (uptime trends) ---- */
+/* Same pattern as #devices-table-wrap and #events-table: cap the table's
+   own height and let it scroll internally (sticky header pinned via `th`'s
+   existing var(--panel-2) background) instead of pushing the page itself
+   to grow past the viewport with a large camera fleet. */
+.health-table-wrap { max-height: 65vh; overflow-y: auto; }
+.health-table-wrap thead th { position: sticky; top: 0; z-index: 1; }
 .health-table-wrap table { min-width: 760px; }
 .health-uptime-pill {
   display: inline-block;

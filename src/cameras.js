@@ -106,10 +106,11 @@ function sanitizeName(name) {
 // ---- CRUD ----
 
 router.get('/', (req, res) => {
-  const cameras = db.prepare('SELECT id, name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, ptz_supported, recording_enabled, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token, serial_number, firmware_version, channel_count FROM cameras ORDER BY sort_order ASC, id ASC').all();
+  const cameras = db.prepare('SELECT id, name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, rtsp_path_sub, rtsp_url_sub, ptz_supported, recording_enabled, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token, serial_number, firmware_version, channel_count FROM cameras ORDER BY sort_order ASC, id ASC').all();
   const isViewer = req.user.role === 'viewer';
   const withStatus = cameras.map(c => {
     const rtspUrl = decrypt(c.rtsp_url);
+    const rtspUrlSub = decrypt(c.rtsp_url_sub);
     // password itself never leaves this function for any role — only the
     // derived strength label does (see passwordStrength() above).
     const { password, ...rest } = c;
@@ -119,11 +120,19 @@ router.get('/', (req, res) => {
       // real thing (editing, building relay-agent commands); viewers just
       // need to know one is configured, not to see the credential.
       rtsp_url: isViewer ? (rtspUrl ? '(tersedia)' : null) : rtspUrl,
+      rtsp_url_sub: isViewer ? (rtspUrlSub ? '(tersedia)' : null) : rtspUrlSub,
       // Needed to prefill the Edit-camera form for admins/operators; not
       // exposed to viewers (they can't edit anyway).
       username: isViewer ? undefined : c.username,
       rtsp_path: isViewer ? undefined : c.rtsp_path,
-      stream: c.is_relay ? relay.getRelayStatus(c.id) : streaming.getStatus(c.id),
+      rtsp_path_sub: isViewer ? undefined : c.rtsp_path_sub,
+      // 'stream' stays the main-profile status (focus/fullscreen view,
+      // unchanged shape from before sub streams existed); 'stream_sub' is
+      // the Live View grid's own lightweight-profile status — relay cameras
+      // have no separate sub feed (the remote agent pushes one stream), so
+      // they just mirror the same relay status for both.
+      stream: c.is_relay ? relay.getRelayStatus(c.id) : streaming.getStatus(c.id, 'main'),
+      stream_sub: c.is_relay ? relay.getRelayStatus(c.id) : streaming.getStatus(c.id, 'sub'),
       recording_active: recording.isRecording(c.id),
       motion_active: motion.isMotionActive(c.id),
       motion_detection_enabled: c.motion_detection_enabled === 1,
@@ -140,7 +149,7 @@ router.get('/', (req, res) => {
 });
 
 router.post('/', requireRole(['admin', 'operator']), (req, res) => {
-  let { name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, ptz_supported, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, is_relay } = req.body;
+  let { name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, rtsp_path_sub, rtsp_url_sub, ptz_supported, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, is_relay } = req.body;
   // Sanitize before checking presence — a whitespace-only name (" ") is
   // truthy and would otherwise sail past `!name`, then come out of
   // sanitizeName() as '' and get stored as a nameless camera (and, via
@@ -153,6 +162,12 @@ router.post('/', requireRole(['admin', 'operator']), (req, res) => {
   const finalRtspUrl = rtsp_url || (rtsp_path
     ? `rtsp://${username ? `${encodeURIComponent(username)}:${encodeURIComponent(password || '')}@` : ''}${ip}:${rtsp_port || 554}${rtsp_path}`
     : null);
+  // Sub stream is entirely optional — no rtsp_path_sub/rtsp_url_sub means
+  // this camera just keeps using the main stream for the Live View grid,
+  // same behavior as before sub streams existed.
+  const finalRtspUrlSub = rtsp_url_sub || (rtsp_path_sub
+    ? `rtsp://${username ? `${encodeURIComponent(username)}:${encodeURIComponent(password || '')}@` : ''}${ip}:${rtsp_port || 554}${rtsp_path_sub}`
+    : null);
 
   const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM cameras').get().m;
   const relayToken = is_relay ? generateRelayToken() : null;
@@ -160,8 +175,8 @@ router.post('/', requireRole(['admin', 'operator']), (req, res) => {
   const finalLocationId = location_id || autoLocation.id;
 
   const info = db.prepare(`
-    INSERT INTO cameras (name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, ptz_supported, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO cameras (name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, rtsp_path_sub, rtsp_url_sub, ptz_supported, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     name,
     brand || null,
@@ -172,6 +187,8 @@ router.post('/', requireRole(['admin', 'operator']), (req, res) => {
     encrypt(password || null),
     rtsp_path || null,
     encrypt(finalRtspUrl),
+    rtsp_path_sub || null,
+    encrypt(finalRtspUrlSub),
     ptz_supported ? 1 : 0,
     motion_detection_enabled ? 1 : 0,
     normalizeMotionSensitivity(motion_sensitivity),
@@ -282,7 +299,7 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
   const cam = getCameraById(id);
   if (!cam) return res.status(404).json({ error: 'Kamera tidak ditemukan' });
 
-  const fields = ['name', 'brand', 'ip', 'rtsp_port', 'onvif_port', 'username', 'password', 'rtsp_path', 'rtsp_url', 'ptz_supported', 'recording_enabled', 'motion_detection_enabled', 'motion_sensitivity', 'motion_recording_enabled', 'location_id', 'building', 'is_relay'];
+  const fields = ['name', 'brand', 'ip', 'rtsp_port', 'onvif_port', 'username', 'password', 'rtsp_path', 'rtsp_url', 'rtsp_path_sub', 'rtsp_url_sub', 'ptz_supported', 'recording_enabled', 'motion_detection_enabled', 'motion_sensitivity', 'motion_recording_enabled', 'location_id', 'building', 'is_relay'];
   const updates = fields.filter(f => f in req.body);
   if (updates.length === 0) return res.status(400).json({ error: 'Tidak ada field untuk diupdate' });
 
@@ -339,6 +356,36 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
     }
   }
 
+  // Same rebuild, mirrored for the sub stream — only when there's actually a
+  // sub path on file (existing or newly-sent) to rebuild against. A camera
+  // with no sub stream configured just has nothing to rebuild here.
+  const rtspSubAffecting = ['ip', 'rtsp_port', 'username', 'password', 'rtsp_path_sub'];
+  if (!('rtsp_url_sub' in req.body) && rtspSubAffecting.some(f => f in req.body)) {
+    const mergedSub = {
+      ip: req.body.ip ?? cam.ip,
+      rtsp_port: req.body.rtsp_port ?? cam.rtsp_port,
+      username: req.body.username ?? cam.username,
+      password: 'password' in req.body ? req.body.password : cam.password,
+      rtsp_path_sub: req.body.rtsp_path_sub ?? cam.rtsp_path_sub,
+    };
+    let pathSub = mergedSub.rtsp_path_sub;
+    if (!pathSub && cam.rtsp_url_sub) {
+      try {
+        const u = new URL(cam.rtsp_url_sub);
+        pathSub = u.pathname + u.search;
+      } catch { /* not a parseable rtsp URL, skip */ }
+    }
+    if (pathSub) {
+      req.body.rtsp_url_sub = `rtsp://${mergedSub.username ? `${encodeURIComponent(mergedSub.username)}:${encodeURIComponent(mergedSub.password || '')}@` : ''}${mergedSub.ip}:${mergedSub.rtsp_port || 554}${pathSub}`;
+      updates.push('rtsp_url_sub');
+    } else if ('rtsp_path_sub' in req.body && !req.body.rtsp_path_sub) {
+      // Explicitly cleared the sub path with no existing sub URL to fall
+      // back on — clear rtsp_url_sub too instead of leaving it stale.
+      req.body.rtsp_url_sub = null;
+      updates.push('rtsp_url_sub');
+    }
+  }
+
   const setClause = updates.map(f => `${f} = ?`).join(', ');
   const values = updates.map((f) => {
     if (f === 'motion_detection_enabled' || f === 'motion_recording_enabled' || f === 'is_relay' || f === 'ptz_supported' || f === 'recording_enabled') {
@@ -360,7 +407,7 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
     if (f === 'building') {
       return req.body[f] ? sanitizeName(req.body[f]) : null;
     }
-    if (f === 'password' || f === 'rtsp_url') {
+    if (f === 'password' || f === 'rtsp_url' || f === 'rtsp_url_sub') {
       return encrypt(req.body[f]);
     }
     return req.body[f];
@@ -511,22 +558,32 @@ router.post('/:id/stream/start', requireRole(['admin', 'operator', 'viewer']), (
   const id = Number(req.params.id);
   const cam = getCameraById(id);
   if (!cam) return res.status(404).json({ error: 'Kamera tidak ditemukan' });
+  // 'sub' = Live View grid tile (lightweight, camera's own low-res feed);
+  // 'main' = focus/fullscreen view + recording (full quality). Anything
+  // unrecognized falls back to 'main', same as before profiles existed.
+  const profile = req.body?.profile === 'sub' ? 'sub' : 'main';
+  const playlist = profile === 'sub' ? `/streams/${id}/sub/index.m3u8` : `/streams/${id}/index.m3u8`;
   if (cam.is_relay) {
     // Nothing to "start" centrally — the remote agent decides when to push.
     // Report whatever the current relay status already is.
-    return res.json({ ok: true, playlist: `/streams/${id}/index.m3u8`, relay: relay.getRelayStatus(id) });
+    return res.json({ ok: true, playlist, relay: relay.getRelayStatus(id) });
   }
+  // A camera with no sub stream configured just streams 'main' quality into
+  // the grid too (streaming.js's rtspUrlFor already falls back to
+  // rtsp_url when rtsp_url_sub is unset) — only a totally unconfigured
+  // camera (no rtsp_url at all) is actually blocked here.
   if (!cam.rtsp_url) return res.status(400).json({ error: 'RTSP URL belum diatur untuk kamera ini' });
 
-  streaming.startStream(cam);
-  res.json({ ok: true, playlist: `/streams/${id}/index.m3u8` });
+  streaming.startStream(cam, profile);
+  res.json({ ok: true, playlist });
 });
 
 router.post('/:id/stream/stop', requireRole(['admin', 'operator', 'viewer']), (req, res) => {
   const id = Number(req.params.id);
   const cam = db.prepare('SELECT is_relay FROM cameras WHERE id = ?').get(id);
   if (cam?.is_relay) return res.json({ ok: true }); // agent-controlled; nothing local to stop
-  streaming.stopStream(id);
+  const profile = req.body?.profile === 'sub' ? 'sub' : 'main';
+  streaming.stopStream(id, profile);
   res.json({ ok: true });
 });
 

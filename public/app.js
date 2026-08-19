@@ -4,6 +4,7 @@ const state = {
   cameras: [],
   players: new Map(), // cameraId -> Hls instance
   pagedOutVideos: new Map(), // cameraId -> detached <video> node kept alive (network paused) while its tile is off the current layout page
+  pagedOutStopTimers: new Map(), // cameraId -> setTimeout handle; fires the actual server-side stream/stop once a paged-out camera has stayed off-page longer than PAGE_OUT_STOP_DELAY_MS
   pollTimer: null,
   layout: localStorage.getItem('vms_layout') || 'auto',
   layoutPage: 0,
@@ -25,6 +26,7 @@ const state = {
   eventsChartDays: 14,
   activityDays: 7,
   activityUserFilter: '',
+  systemHealthTimer: null,
   currentRecording: null, // { id, filename, cameraLabel } for whatever's open in the player modal
 };
 
@@ -198,6 +200,9 @@ function logout() {
   state.pollTimer = null;
   if (state.alertPollTimer) clearInterval(state.alertPollTimer);
   state.alertPollTimer = null;
+  if (state.systemHealthTimer) clearInterval(state.systemHealthTimer);
+  state.systemHealthTimer = null;
+  clearAllPagedOutStopTimers();
   for (const id of state.players.keys()) stopPlayer(id);
   state.token = null;
   state.user = {};
@@ -333,8 +338,25 @@ function renderNavForRole() {
   document.querySelectorAll('.nav-item[data-view="users"], .nav-item[data-view="activity"]').forEach((item) => {
     item.style.display = state.user.role === 'admin' ? 'block' : 'none';
   });
-  const devicesNav = $('.nav-item[data-view="devices"]');
-  if (devicesNav) devicesNav.style.display = state.user.role === 'viewer' ? 'none' : 'block';
+  // "Perangkat" used to be its own nav item, hidden entirely from viewers
+  // (serial numbers/firmware/password strength are admin+operator info).
+  // It's now the default sub-tab inside the merged "Perangkat" nav item
+  // (see index.html #map-sub-tabs) — same access restriction, just applied
+  // to the sub-tab button instead of a whole nav item. A viewer who was
+  // sitting on it (or whose session defaults there) gets bounced to
+  // "Daftar Lokasi", which — like the map itself — stays open to every role.
+  const isViewer = state.user.role === 'viewer';
+  const devicesSubTab = $('.sub-tab[data-subtab="devices"]');
+  if (devicesSubTab) devicesSubTab.style.display = isViewer ? 'none' : '';
+  if (isViewer && mapSubTab === 'devices') activateMapSubTab('list');
+  // Same story for "Kesehatan Server" — used to be its own admin-only nav
+  // item, now the last sub-tab inside "Device & Server" (see
+  // index.html #devsrv-sub-tabs). Non-admins sitting on it get bounced to
+  // "Rekaman" (the default), same reasoning as the devices bounce above.
+  const isAdmin = state.user.role === 'admin';
+  const systemSubTab = $('.sub-tab[data-subtab="system"]');
+  if (systemSubTab) systemSubTab.style.display = isAdmin ? '' : 'none';
+  if (!isAdmin && devsrvSubTab === 'system') activateDevSrvSubTab('recordings');
   // "Pengaturan Sistem" moved from the main nav into the footer's
   // "Pengaturan" menu (see index.html) — it isn't a .nav-item anymore, so
   // it needs its own visibility toggle here instead of riding the selector
@@ -554,7 +576,7 @@ if (state.token) enterApp();
 
 // ---- Navigation ----
 
-const ALL_VIEWS = ['dashboard', 'live', 'devices', 'map', 'recordings', 'events', 'health', 'users', 'activity', 'settings', 'sop'];
+const ALL_VIEWS = ['dashboard', 'live', 'map', 'devsrv', 'users', 'activity', 'settings', 'sop'];
 
 function showView(viewName) {
   ALL_VIEWS.forEach((v) => {
@@ -565,19 +587,34 @@ function showView(viewName) {
   closeDrawer(); // no-op on desktop; on mobile the sidebar is an off-canvas drawer
 }
 
+// Only poll server CPU/RAM while the "Kesehatan Server" sub-tab is actually
+// visible. Called both when leaving the "Device & Server" nav item entirely
+// and when switching sub-tabs within it (see activateDevSrvSubTab) — the
+// nav-item click handler alone can't cover the latter, since sub-tab clicks
+// don't go through it.
+function stopSystemHealthPolling() {
+  if (state.systemHealthTimer) { clearInterval(state.systemHealthTimer); state.systemHealthTimer = null; }
+}
+
 document.querySelectorAll('.nav-item').forEach((item) => {
   item.addEventListener('click', () => {
     document.querySelectorAll('.nav-item').forEach((i) => i.classList.remove('active'));
     item.classList.add('active');
     showView(item.dataset.view);
     if (item.dataset.view === 'dashboard') loadDashboard();
-    if (item.dataset.view === 'recordings') loadRecordings();
-    if (item.dataset.view === 'events') loadEvents();
-    if (item.dataset.view === 'health') loadHealthTrends(state.healthTrendDays || 7);
-    if (item.dataset.view === 'devices') { closeDeviceDetail(); renderDeviceTable(); }
     if (item.dataset.view === 'users') loadUsers();
     if (item.dataset.view === 'activity') loadUserActivity(state.activityDays || 7);
-    if (item.dataset.view === 'map') showMapView();
+    // "Perangkat" (devices) is now the default sub-tab inside this same nav
+    // item (see #map-sub-tabs) — closeDeviceDetail() resets any drill-down
+    // left open from a previous visit, same as the old dedicated nav item
+    // used to on every click, so re-entering always lands on the list.
+    if (item.dataset.view === 'map') { closeDeviceDetail(); showMapView(); }
+    stopSystemHealthPolling();
+    // "Rekaman", "Log peristiwa", "Kesehatan Kamera" and "Kesehatan Server"
+    // are now sub-tabs inside this one nav item (see #devsrv-sub-tabs) —
+    // showDevSrvView() re-activates whichever one was last active, which
+    // restarts the CPU/RAM poll above if that happens to be "system".
+    if (item.dataset.view === 'devsrv') showDevSrvView();
   });
 });
 
@@ -698,7 +735,10 @@ async function loadCameras() {
       const cam = state.cameras.find((c) => c.id === focusCameraId);
       if (cam) renderFocusModal(cam);
     }
-    if (!$('#view-devices')?.classList.contains('hidden')) renderDeviceTable();
+    // "Perangkat" is now the "devices" sub-tab inside #view-map (see
+    // #map-sub-tabs) rather than its own top-level view — check both that
+    // the merged view is open and that tab is the active one.
+    if (!$('#view-map')?.classList.contains('hidden') && mapSubTab === 'devices') renderDeviceTable();
   } catch (e) {
     console.error(e);
   }
@@ -735,15 +775,47 @@ async function reorderCameras(draggedId, targetId) {
 
 // Fixed-slot layouts show a set number of tiles per "page" and pad any
 // remaining slots with placeholders, like a real VMS layout preset.
-// 'auto' keeps the original responsive wrap with no slot limit.
+// 'auto' keeps the original responsive wrap (no empty filler tiles, grid
+// just reflows to fit however many cameras are on the page) but still
+// needs a page cap — without one, every camera in the DB would get its
+// own hls.js instance + <video> element at once when viewed/started
+// together, which is the main driver of ballooning browser tab memory.
+// pageSize (not slots) drives that cap for auto so the empty-tile-padding
+// branch below (which keys off `slots`) stays off for it.
+const AUTO_LAYOUT_PAGE_SIZE = 12;
 const LAYOUTS = {
-  auto: { slots: null },
+  auto: { slots: null, pageSize: AUTO_LAYOUT_PAGE_SIZE },
   '1x1': { slots: 1 },
   '2x2': { slots: 4 },
   '3x3': { slots: 9 },
   '4x4': { slots: 16 },
   spotlight: { slots: 6 },
 };
+
+// The server tracks *why* a stream isn't playing (wrong RTSP credentials,
+// unreachable IP, a corrupt/incompatible codec, waiting on a concurrency
+// slot — see lastError in streaming.js) but nothing ever showed it: a dead
+// tile just said "Menyambung ulang..." forever with no way to tell "this
+// will recover on its own" from "this camera is misconfigured and will
+// retry forever for nothing" without pulling server logs. Surfacing it
+// here means whoever's looking at the grid can tell at a glance. Only
+// shown once reconnecting has actually kicked in — a stream's first
+// connection attempt hasn't failed yet, so there's nothing to report before
+// then. Truncated (ffmpeg stderr excerpts can run to hundreds of chars);
+// full text still available via the title attribute (hover) for whoever
+// needs it.
+function streamPlaceholderInfo(status, rtspUrl) {
+  if (!rtspUrl) return { text: 'RTSP belum diatur — lakukan ONVIF probe', title: '', isError: false };
+  if (status.reconnecting) {
+    if (status.lastError) {
+      const oneLine = status.lastError.replace(/\s+/g, ' ').trim();
+      const short = oneLine.length > 90 ? `${oneLine.slice(0, 90)}…` : oneLine;
+      return { text: `Gagal konek: ${short}`, title: oneLine, isError: true };
+    }
+    return { text: 'Menyambung ulang...', title: '', isError: false };
+  }
+  return { text: 'Klik "Live" untuk mulai menonton', title: '', isError: false };
+}
 
 function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
   const tile = document.createElement('div');
@@ -780,14 +852,15 @@ function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
 
   const camLocation = state.locations.find((l) => l.id === cam.location_id);
   const hasMenuItems = tileActionMenuItems(cam).length > 0;
+  const subPlaceholder = streamPlaceholderInfo(cam.stream_sub, cam.rtsp_url);
 
   tile.innerHTML = `
     <div class="tile-video">
       ${bulkMode ? `<div class="bulk-select-checkbox ${isSelected ? 'checked' : ''}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>` : ''}
       <video id="video-${cam.id}" muted playsinline></video>
-      <div class="placeholder ${cam.stream.active ? 'hidden' : ''}" id="placeholder-${cam.id}">${cam.rtsp_url ? (cam.stream.reconnecting ? 'Menyambung ulang...' : 'Klik "Live" untuk mulai menonton') : 'RTSP belum diatur — lakukan ONVIF probe'}</div>
+      <div class="placeholder ${cam.stream_sub.active ? 'hidden' : ''}${subPlaceholder.isError ? ' placeholder-error' : ''}" id="placeholder-${cam.id}" title="${escapeHtml(subPlaceholder.title)}">${escapeHtml(subPlaceholder.text)}</div>
       <div class="status-badge">
-        <span class="status-pill ${cam.stream.active ? 'live-on' : (cam.stream.reconnecting ? 'reconnecting' : '')}"><span class="status-dot live"></span>${cam.stream.reconnecting && !cam.stream.active ? 'Reconnecting' : 'Live'}</span>
+        <span class="status-pill ${cam.stream_sub.active ? 'live-on' : (cam.stream_sub.reconnecting ? 'reconnecting' : '')}"><span class="status-dot live"></span>${cam.stream_sub.reconnecting && !cam.stream_sub.active ? 'Reconnecting' : 'Live'}</span>
         <span class="status-pill ${cam.recording_active ? 'rec-on' : ''}"><span class="status-dot rec"></span>Rec</span>
         <span class="status-pill ${cam.motion_active ? 'motion-on' : ''}"><span class="status-dot motion"></span>Motion</span>
       </div>
@@ -997,7 +1070,7 @@ function tileActionMenuItems(cam) {
         state.user.role === 'admin' && { action: 'delete', label: 'Hapus', danger: true },
       ]
     : [
-        { action: 'stream', label: cam.stream.active ? 'Stop live' : 'Live' },
+        { action: 'stream', label: cam.stream_sub.active ? 'Stop live' : 'Live' },
         { action: 'record', label: cam.recording_active ? 'Stop rekam' : 'Rekam' },
         { action: 'probe', label: 'Probe ONVIF' },
         canEdit && { action: 'edit', label: 'Edit' },
@@ -1124,6 +1197,7 @@ function renderGrid() {
     }
     state.players.clear();
     state.pagedOutVideos.clear();
+    clearAllPagedOutStopTimers();
     updateLayoutPager(0, 0);
     return;
   }
@@ -1140,20 +1214,22 @@ function renderGrid() {
     }
     state.players.clear();
     state.pagedOutVideos.clear();
+    clearAllPagedOutStopTimers();
     updateLayoutPager(0, 0);
     return;
   }
 
   const layoutDef = LAYOUTS[state.layout] || LAYOUTS.auto;
   const slotCount = layoutDef.slots;
+  const pageSize = layoutDef.pageSize || slotCount;
   let camerasToShow = filteredCameras;
 
-  if (slotCount) {
-    const totalPages = Math.max(1, Math.ceil(filteredCameras.length / slotCount));
+  if (pageSize) {
+    const totalPages = Math.max(1, Math.ceil(filteredCameras.length / pageSize));
     if (state.layoutPage >= totalPages) state.layoutPage = totalPages - 1;
     if (state.layoutPage < 0) state.layoutPage = 0;
-    const start = state.layoutPage * slotCount;
-    camerasToShow = filteredCameras.slice(start, start + slotCount);
+    const start = state.layoutPage * pageSize;
+    camerasToShow = filteredCameras.slice(start, start + pageSize);
     updateLayoutPager(state.layoutPage, totalPages, filteredCameras.length - (start + camerasToShow.length));
   } else {
     updateLayoutPager(0, 0);
@@ -1213,15 +1289,16 @@ function renderGrid() {
 
   const activeIds = new Set(playingIds);
   for (const cam of camerasToShow) {
-    if (cam.stream.active) activeIds.add(cam.id);
+    if (cam.stream_sub.active) activeIds.add(cam.id);
   }
   for (const id of activeIds) {
     const cam = state.cameras.find((c) => c.id === id);
-    if (!cam || !cam.stream.active) {
+    if (!cam || !cam.stream_sub.active) {
       const hls = state.players.get(id);
       if (hls) hls.destroy();
       state.players.delete(id);
       state.pagedOutVideos.delete(id);
+      cancelPagedOutStop(id);
       continue;
     }
 
@@ -1235,12 +1312,21 @@ function renderGrid() {
       // reconnecting from scratch, but stop its network activity while
       // unseen so it doesn't keep competing for the 6-connections-per-host
       // budget or wasting bandwidth on a stream nobody's looking at.
+      // schedulePagedOutStop backstops this: if it's still off-page after
+      // PAGE_OUT_STOP_DELAY_MS, the server-side ffmpeg process gets stopped
+      // too, not just the client-side load.
       if (liveVideo && state.players.has(id)) {
         state.players.get(id).stopLoad();
         state.pagedOutVideos.set(id, liveVideo);
+        schedulePagedOutStop(id);
       }
       continue;
     }
+
+    // Tile is visible again — cancel any pending paged-out stop before it
+    // fires (it would otherwise race the code below and stop a stream the
+    // user is now looking at).
+    cancelPagedOutStop(id);
 
     if (liveVideo && state.players.has(id)) {
       placeholderVideo.replaceWith(liveVideo);
@@ -1251,7 +1337,7 @@ function renderGrid() {
       // and cause a visible hiccup for playback that was never interrupted.
       if (idsResumingFromPagedOut.has(id)) state.players.get(id).startLoad();
     } else if (!focusViewOpen) {
-      startPlayer(id, `/streams/${id}/index.m3u8`);
+      startPlayer(id, `/streams/${id}/sub/index.m3u8`);
     }
   }
 }
@@ -1305,11 +1391,15 @@ async function handleTileAction(action, id) {
 
   try {
     if (action === 'stream') {
-      if (cam.stream.active) {
-        await api(`/cameras/${id}/stream/stop`, { method: 'POST' });
+      // Grid tiles use the 'sub' (lightweight) profile — much cheaper for
+      // ffmpeg to decode+scale+re-encode than main, so more tiles can be
+      // live at once. Falls back to main-stream quality server-side for any
+      // camera that hasn't configured a sub stream path.
+      if (cam.stream_sub.active) {
+        await api(`/cameras/${id}/stream/stop`, { method: 'POST', body: { profile: 'sub' } });
         stopPlayer(id);
       } else {
-        const res = await api(`/cameras/${id}/stream/start`, { method: 'POST' });
+        const res = await api(`/cameras/${id}/stream/start`, { method: 'POST', body: { profile: 'sub' } });
         startPlayer(id, res.playlist);
       }
     } else if (action === 'record') {
@@ -1431,6 +1521,54 @@ function stopPlayer(id) {
     state.players.delete(id);
   }
   state.pagedOutVideos.delete(id);
+}
+
+// A camera paged off the current layout page keeps its ffmpeg process (and
+// hls.js player, parked via pagedOutVideos) alive so flipping back is
+// instant — but left alone indefinitely that's exactly the unbounded
+// server-side memory/CPU the pagination cap was meant to fix. Give it a
+// short grace window instead of stopping it the instant it's paged out:
+// long enough that fast back-and-forth page flipping still gets the
+// instant-resume behavior (no reconnect, no flicker), short enough that a
+// camera nobody's actually looking at gets shut down within seconds, not
+// the 5-minute server-side idle-timeout's worth of wasted resources.
+const PAGE_OUT_STOP_DELAY_MS = 8000;
+
+function schedulePagedOutStop(id) {
+  if (state.pagedOutStopTimers.has(id)) return; // already counting down
+  const timer = setTimeout(() => {
+    state.pagedOutStopTimers.delete(id);
+    stopPagedOutStream(id);
+  }, PAGE_OUT_STOP_DELAY_MS);
+  state.pagedOutStopTimers.set(id, timer);
+}
+
+function cancelPagedOutStop(id) {
+  const timer = state.pagedOutStopTimers.get(id);
+  if (timer) {
+    clearTimeout(timer);
+    state.pagedOutStopTimers.delete(id);
+  }
+}
+
+function clearAllPagedOutStopTimers() {
+  for (const timer of state.pagedOutStopTimers.values()) clearTimeout(timer);
+  state.pagedOutStopTimers.clear();
+}
+
+async function stopPagedOutStream(id) {
+  // Still paged-out when the timer actually fires? (Could have been paged
+  // back into view and stopPlayer()'d — which clears pagedOutVideos — in
+  // the gap between scheduling and firing.) Skip if not, so this never
+  // stops a stream the user is back to watching.
+  if (!state.pagedOutVideos.has(id)) return;
+  try {
+    await api(`/cameras/${id}/stream/stop`, { method: 'POST', body: { profile: 'sub' } });
+  } catch (e) {
+    console.error(`Gagal menghentikan live kamera #${id} (paginasi idle):`, e.message);
+  }
+  stopPlayer(id);
+  await loadCameras();
 }
 
 // ---- Focus view (click a camera tile to enlarge it) ----
@@ -1555,9 +1693,10 @@ function renderFocusModal(cam) {
     video.removeAttribute('src');
     video.load();
     placeholder.classList.remove('hidden');
-    placeholder.textContent = cam.stream.reconnecting
-      ? 'Menyambung ulang...'
-      : (cam.rtsp_url ? 'Klik "Live" untuk mulai menonton' : 'RTSP belum diatur — lakukan ONVIF probe');
+    const mainPlaceholder = streamPlaceholderInfo(cam.stream, cam.rtsp_url);
+    placeholder.textContent = mainPlaceholder.text;
+    placeholder.title = mainPlaceholder.title;
+    placeholder.classList.toggle('placeholder-error', mainPlaceholder.isError);
   }
 }
 
@@ -1621,16 +1760,40 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Used to target every camera in the DB — with 200 cameras that's exactly
+// the ffmpeg spawn burst that overwhelmed Windows's process-creation
+// subsystem (see SOFTWARE_CONCURRENCY_LIMIT in streaming.js: "spawn
+// UNKNOWN" errno -4094, zero ffmpeg processes actually running). Scoping
+// "Nyalakan Halaman Ini" to just the current layout page instead keeps it
+// useful as a one-click way to light up what you're actually looking at,
+// without ever asking the server to spawn more streams at once than fit on
+// screen. Mirrors the exact slice renderGrid() shows — same
+// getVisibleCameras() filter, same layout/page math — so "what's on
+// screen" and "what this button turns on" never disagree.
+function getCurrentPageCameras() {
+  const filteredCameras = getVisibleCameras();
+  const layoutDef = LAYOUTS[state.layout] || LAYOUTS.auto;
+  const pageSize = layoutDef.pageSize || layoutDef.slots;
+  if (!pageSize) return filteredCameras;
+  const totalPages = Math.max(1, Math.ceil(filteredCameras.length / pageSize));
+  const page = Math.min(Math.max(state.layoutPage, 0), totalPages - 1);
+  const start = page * pageSize;
+  return filteredCameras.slice(start, start + pageSize);
+}
+
 $('#stream-start-all-btn')?.addEventListener('click', async () => {
   const btn = $('#stream-start-all-btn');
-  const targets = state.cameras.filter((c) => c.rtsp_url && !c.stream.active);
+  // Always targets the grid's 'sub' profile — sub streams cost far less to
+  // encode than main, so more of the current page can actually go live at
+  // once.
+  const targets = getCurrentPageCameras().filter((c) => c.rtsp_url && !c.stream_sub.active);
   if (targets.length === 0) return;
   btn.disabled = true;
   try {
     for (let i = 0; i < targets.length; i++) {
       const cam = targets[i];
       try {
-        await api(`/cameras/${cam.id}/stream/start`, { method: 'POST' });
+        await api(`/cameras/${cam.id}/stream/start`, { method: 'POST', body: { profile: 'sub' } });
       } catch (e) {
         console.error(`Gagal menyalakan live "${cam.name}":`, e.message);
       }
@@ -1644,13 +1807,13 @@ $('#stream-start-all-btn')?.addEventListener('click', async () => {
 
 $('#stream-stop-all-btn')?.addEventListener('click', async () => {
   const btn = $('#stream-stop-all-btn');
-  const targets = state.cameras.filter((c) => c.stream.active);
+  const targets = state.cameras.filter((c) => c.stream_sub.active);
   if (targets.length === 0) return;
   btn.disabled = true;
   try {
     for (const cam of targets) {
       try {
-        await api(`/cameras/${cam.id}/stream/stop`, { method: 'POST' });
+        await api(`/cameras/${cam.id}/stream/stop`, { method: 'POST', body: { profile: 'sub' } });
         stopPlayer(cam.id);
       } catch (e) {
         console.error(`Gagal menghentikan live "${cam.name}":`, e.message);
@@ -1689,6 +1852,7 @@ function openCameraModal(cam) {
   $('#cam-password').value = '';
   $('#cam-password').placeholder = cam ? 'Kosongkan kalau tidak diubah' : '';
   $('#cam-rtsp-path').value = cam?.rtsp_path || '';
+  $('#cam-rtsp-path-sub').value = cam?.rtsp_path_sub || '';
   $('#cam-motion-enabled').checked = !!cam?.motion_detection_enabled;
   $('#cam-motion-recording').checked = !!cam?.motion_recording_enabled;
   $('#cam-motion-sensitivity').value = cam?.motion_sensitivity || 0.04;
@@ -1737,6 +1901,7 @@ $('#cam-save-btn').addEventListener('click', async () => {
       rtsp_port: Number($('#cam-rtsp-port').value) || 554,
       username: $('#cam-username').value.trim(),
       rtsp_path: $('#cam-rtsp-path').value.trim(),
+      rtsp_path_sub: $('#cam-rtsp-path-sub').value.trim(),
       motion_detection_enabled: $('#cam-motion-enabled').checked,
       motion_sensitivity: Number($('#cam-motion-sensitivity').value) || 0.04,
       motion_recording_enabled: $('#cam-motion-recording').checked,
@@ -1779,7 +1944,7 @@ $('#cam-save-btn').addEventListener('click', async () => {
 
     setTimeout(() => {
       $('#camera-modal').classList.add('hidden');
-      ['cam-name', 'cam-brand', 'cam-ip', 'cam-username', 'cam-password', 'cam-rtsp-path', 'cam-motion-sensitivity', 'cam-building'].forEach((id) => ($(`#${id}`).value = ''));
+      ['cam-name', 'cam-brand', 'cam-ip', 'cam-username', 'cam-password', 'cam-rtsp-path', 'cam-rtsp-path-sub', 'cam-motion-sensitivity', 'cam-building'].forEach((id) => ($(`#${id}`).value = ''));
       $('#cam-motion-enabled').checked = false;
       $('#cam-motion-recording').checked = false;
       $('#cam-location').value = '';
@@ -2605,13 +2770,36 @@ function wireTabStrip(containerSelector, { dataAttr = 'subtab', panelId, onSwitc
   return activate;
 }
 
-let mapSubTab = 'list';
+// "Daftar Perangkat" is the default landing sub-tab (see index.html — its
+// button starts with the 'active' class) since device management is the
+// more frequently-used of the two merged sections. Viewers get bounced off
+// it in renderNavForRole() (they can't see the sub-tab button at all).
+let mapSubTab = 'devices';
+
+// Header title + which action buttons show is per-tab: device management
+// (Probe Semua / Tambah kamera) doesn't make sense while looking at
+// locations, and Tambah Lokasi doesn't make sense while looking at devices
+// — same header element, just repurposed instead of three separate ones.
+const MAP_SUBTAB_META = {
+  devices: { title: 'Perangkat', showDeviceActions: true },
+  list: { title: 'Peta Lokasi', showDeviceActions: false },
+  map: { title: 'Peta Lokasi', showDeviceActions: false },
+};
 
 const activateMapSubTab = wireTabStrip('#map-sub-tabs', {
   panelId: (tab) => `map-subview-${tab}`,
   onSwitch: (tab) => {
     mapSubTab = tab;
-    if (tab === 'list') {
+    const meta = MAP_SUBTAB_META[tab] || MAP_SUBTAB_META.list;
+    const titleEl = $('#devices-map-title');
+    if (titleEl) titleEl.textContent = meta.title;
+    $('#device-probe-all-btn')?.classList.toggle('hidden', !meta.showDeviceActions);
+    $('#device-add-btn')?.classList.toggle('hidden', !meta.showDeviceActions);
+    $('#add-location-btn')?.classList.toggle('hidden', meta.showDeviceActions);
+    if (tab === 'devices') {
+      closeDeviceDetail(); // land on the list, not wherever a previous visit drilled into
+      renderDeviceTable();
+    } else if (tab === 'list') {
       renderLocationsTable();
     } else {
       initMapIfNeeded();
@@ -2625,9 +2813,37 @@ const activateMapSubTab = wireTabStrip('#map-sub-tabs', {
 });
 
 function showMapView() {
-  // Default to the "Daftar Lokasi" tab — the map (and its tile requests)
-  // only initializes lazily once the user actually clicks the "Peta" tab.
+  // Re-activates whichever sub-tab (devices/list/map) was last active
+  // instead of always resetting to the default — the map (and its tile
+  // requests) only initializes lazily once the user actually clicks the
+  // "Peta" tab.
   activateMapSubTab(mapSubTab);
+}
+
+// "Device & Server" bundles four previously-separate top-level nav items
+// (Rekaman, Log Peristiwa, Kesehatan Kamera, Kesehatan Server) into one,
+// the same sub-tab pattern used for "Perangkat" above. "Rekaman" is the
+// default landing sub-tab (first in reading order); each sub-tab's own
+// data only gets (re)loaded once it's actually the one being switched to.
+let devsrvSubTab = 'recordings';
+
+const activateDevSrvSubTab = wireTabStrip('#devsrv-sub-tabs', {
+  panelId: (tab) => `devsrv-subview-${tab}`,
+  onSwitch: (tab) => {
+    devsrvSubTab = tab;
+    stopSystemHealthPolling(); // only the 'system' branch below restarts it
+    if (tab === 'recordings') loadRecordings();
+    else if (tab === 'events') loadEvents();
+    else if (tab === 'health') loadHealthTrends(state.healthTrendDays || 7);
+    else if (tab === 'system') {
+      loadSystemHealth();
+      state.systemHealthTimer = setInterval(loadSystemHealth, 3000);
+    }
+  },
+});
+
+function showDevSrvView() {
+  activateDevSrvSubTab(devsrvSubTab);
 }
 
 function initMapIfNeeded() {
@@ -3352,6 +3568,92 @@ document.querySelectorAll('#health-range-picker .chip').forEach((btn) => {
   btn.addEventListener('click', () => loadHealthTrends(Number(btn.dataset.days)));
 });
 
+// ---- "Kesehatan Server" (CPU/RAM) ----
+// Opposite direction from uptimeTone: here higher % is worse (busier CPU,
+// fuller RAM), not better.
+function usageTone(pct) {
+  if (pct >= 90) return 'error';
+  if (pct >= 75) return 'warn';
+  return 'success';
+}
+
+async function loadSystemHealth() {
+  try {
+    const data = await api('/system-health');
+    renderSystemHealth(data);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderSystemHealth(data) {
+  const { cpu, memory, process: proc, system } = data;
+
+  const statsEl = $('#sys-stats');
+  if (statsEl) {
+    const tiles = [
+      { tone: usageTone(cpu.percent), value: `${cpu.percent}%`, label: `CPU (${cpu.core_count} core)` },
+      { tone: usageTone(memory.percent), value: `${memory.percent}%`, label: 'RAM terpakai' },
+      { tone: 'neutral', value: formatDuration(system.uptime_seconds * 1000), label: 'Waktu aktif server' },
+      { tone: 'neutral', value: cpu.load_average[0] ? cpu.load_average[0].toFixed(2) : '-', label: 'Load average (1 menit)' },
+    ];
+    statsEl.innerHTML = tiles.map((t) => `
+      <div class="stat-tile">
+        <div class="stat-icon tone-${t.tone}">${TONE_ICON[t.tone] || TONE_ICON.neutral}</div>
+        <div class="stat-body">
+          <div class="stat-value">${t.value}</div>
+          <div class="stat-label">${escapeHtml(String(t.label))}</div>
+        </div>
+      </div>
+    `).join('');
+    animateStatTiles(statsEl);
+  }
+
+  const cpuFill = $('#sys-cpu-fill');
+  if (cpuFill) { cpuFill.style.width = `${cpu.percent}%`; cpuFill.className = `sys-meter-fill tone-${usageTone(cpu.percent)}`; }
+  const cpuValue = $('#sys-cpu-value');
+  if (cpuValue) cpuValue.textContent = `${cpu.percent}%`;
+
+  const coreGrid = $('#sys-core-grid');
+  if (coreGrid) {
+    coreGrid.innerHTML = cpu.cores.map((pct, i) => `
+      <div class="sys-core-row" title="Core ${i}: ${pct}%">
+        <span class="sys-core-label">${i}</span>
+        <div class="sys-core-bar"><div class="sys-core-fill tone-${usageTone(pct)}" style="width:${pct}%"></div></div>
+      </div>
+    `).join('');
+  }
+
+  const memFill = $('#sys-mem-fill');
+  if (memFill) { memFill.style.width = `${memory.percent}%`; memFill.className = `sys-meter-fill tone-${usageTone(memory.percent)}`; }
+  const memValue = $('#sys-mem-value');
+  if (memValue) memValue.textContent = `${memory.percent}%`;
+
+  const memDetail = $('#sys-mem-detail');
+  if (memDetail) {
+    memDetail.textContent = `${formatBytes(memory.used_bytes)} terpakai dari ${formatBytes(memory.total_bytes)} (${formatBytes(memory.free_bytes)} bebas)`;
+  }
+
+  const infoGrid = $('#sys-info-grid');
+  if (infoGrid) {
+    const rows = [
+      ['Hostname', system.hostname || '-'],
+      ['Platform', system.platform || '-'],
+      ['Memori Proses (RSS)', formatBytes(proc.rss_bytes)],
+      ['Waktu Aktif Proses', formatDuration(proc.uptime_seconds * 1000)],
+    ];
+    infoGrid.innerHTML = rows.map(([label, value]) => `
+      <div class="about-row">
+        <span class="about-label">${escapeHtml(label)}</span>
+        <span class="about-value">${escapeHtml(value)}</span>
+      </div>
+    `).join('');
+  }
+
+  const sampledEl = $('#sys-sampled-at');
+  if (sampledEl) sampledEl.textContent = `Diperbarui ${new Date(data.sampled_at).toLocaleTimeString('id-ID')}`;
+}
+
 const EVENT_META = {
   camera_added: { label: 'Kamera ditambahkan', tone: 'info', group: 'camera' },
   camera_updated: { label: 'Kamera diperbarui', tone: 'info', group: 'camera' },
@@ -3361,6 +3663,7 @@ const EVENT_META = {
   stream_stopped: { label: 'Live stream dihentikan', tone: 'neutral', group: 'stream' },
   stream_error: { label: 'Live stream error', tone: 'error', group: 'stream' },
   stream_reconnecting: { label: 'Live stream menyambung ulang', tone: 'warn', group: 'stream' },
+  stream_idle_timeout: { label: 'Live stream dihentikan otomatis (idle)', tone: 'warn', group: 'stream' },
   recording_started: { label: 'Rekaman dimulai', tone: 'success', group: 'recording' },
   recording_resumed: { label: 'Rekaman dilanjutkan otomatis setelah restart', tone: 'info', group: 'recording' },
   recording_stopped: { label: 'Rekaman dihentikan', tone: 'neutral', group: 'recording' },

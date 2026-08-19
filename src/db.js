@@ -115,6 +115,17 @@ ensureColumn('cameras', 'building', 'TEXT');
 ensureColumn('cameras', 'serial_number', 'TEXT');
 ensureColumn('cameras', 'firmware_version', 'TEXT');
 ensureColumn('cameras', 'channel_count', 'INTEGER DEFAULT 1');
+// Sub stream: most IP cameras output a second, lower-resolution/lower-bitrate
+// feed in parallel with the main stream (their own hardware does the
+// downscale, not our ffmpeg). Using it for the Live View grid instead of the
+// main stream means each tile costs ffmpeg far less CPU to decode+scale+
+// re-encode — the main stream stays reserved for the single-camera focus
+// view and recording, where quality actually matters and only one stream's
+// cost is paid at a time. Both columns are nullable/optional: a camera with
+// no sub stream configured just keeps using the main stream for grid too,
+// same as before this existed.
+ensureColumn('cameras', 'rtsp_path_sub', 'TEXT');
+ensureColumn('cameras', 'rtsp_url_sub', 'TEXT');
 ensureColumn('events', 'acknowledged', 'INTEGER DEFAULT 0');
 ensureColumn('events', 'actor_id', 'INTEGER');
 ensureColumn('events', 'actor_username', 'TEXT');
@@ -157,7 +168,7 @@ function logEvent(cameraId, type, message, actor = null) {
 // forgets to decrypt.
 function decryptCamera(cam) {
   if (!cam) return cam;
-  return { ...cam, password: decrypt(cam.password), rtsp_url: decrypt(cam.rtsp_url) };
+  return { ...cam, password: decrypt(cam.password), rtsp_url: decrypt(cam.rtsp_url), rtsp_url_sub: decrypt(cam.rtsp_url_sub) };
 }
 
 function getCameraById(id) {

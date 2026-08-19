@@ -76,25 +76,13 @@
         <svg class="location-dropdown-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
       </button>
     </div>
-    <div class="nav-item" data-view="devices" style="display:none">
+    <div class="nav-item" data-view="map">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
       Perangkat
     </div>
-    <div class="nav-item" data-view="map">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.1-7-11a7 7 0 0 1 14 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>
-      Peta Lokasi
-    </div>
-    <div class="nav-item" data-view="recordings">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/></svg>
-      Rekaman
-    </div>
-    <div class="nav-item" data-view="events">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
-      Log peristiwa
-    </div>
-    <div class="nav-item" data-view="health">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-      Kesehatan Kamera
+    <div class="nav-item" data-view="devsrv">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg>
+      Device & Server
     </div>
     <div class="nav-item" data-view="users" style="display:none">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -191,9 +179,9 @@
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>
             Hentikan Semua
           </button>
-          <button class="btn secondary" id="stream-start-all-btn" title="Nyalakan semua live view">
+          <button class="btn secondary" id="stream-start-all-btn" title="Nyalakan semua kamera di halaman ini saja">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4l13 8-13 8V4z"/></svg>
-            Nyalakan Semua
+            Nyalakan Halaman Ini
           </button>
           <button class="btn secondary" id="import-csv-btn" title="Import banyak kamera sekaligus dari file CSV">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
@@ -273,19 +261,117 @@
 
     <div id="view-map" class="hidden">
       <div class="main-header">
-        <h2>Peta Lokasi</h2>
-        <button class="btn" id="add-location-btn">
+        <h2 id="devices-map-title">Perangkat</h2>
+        <button class="btn secondary" id="device-probe-all-btn" title="Ambil No. Seri &amp; Versi Firmware dari semua perangkat lewat ONVIF">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+          Probe Semua
+        </button>
+        <button class="btn" id="device-add-btn">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Tambah kamera
+        </button>
+        <button class="btn hidden" id="add-location-btn">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
           Tambah Lokasi
         </button>
       </div>
 
       <div class="sub-tabs" id="map-sub-tabs">
-        <button class="sub-tab active" data-subtab="list">Daftar Lokasi</button>
+        <button class="sub-tab active" data-subtab="devices">Daftar Perangkat</button>
+        <button class="sub-tab" data-subtab="list">Daftar Lokasi</button>
         <button class="sub-tab" data-subtab="map">Peta</button>
       </div>
 
-      <div id="map-subview-list">
+      <div id="map-subview-devices">
+        <div id="devices-list-view">
+          <div class="camera-search">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input id="device-search-input" type="text" placeholder="Cari perangkat (nama, IP, No. Seri)..." />
+            <button id="device-search-clear" class="hidden" title="Hapus pencarian">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="table-wrap" id="devices-table-wrap">
+            <table>
+              <thead><tr><th>Nama</th><th>Alamat</th><th>No. Seri</th><th>Versi Firmware</th><th>Channel</th><th>Status Jaringan</th><th>Kekuatan Password</th><th></th></tr></thead>
+              <tbody id="devices-table"></tbody>
+            </table>
+          </div>
+          <div class="pagination-bar">
+            <span id="devices-total-label">Total: 0</span>
+            <select id="devices-page-size">
+              <option value="25">25 /Halaman</option>
+              <option value="50" selected>50 /Halaman</option>
+              <option value="100">100 /Halaman</option>
+              <option value="200">200 /Halaman</option>
+            </select>
+            <div class="pagination-bar-goto">
+              <input id="devices-page-input" type="number" min="1" value="1" />
+              <span id="devices-page-total">/ 1</span>
+              <button class="btn secondary" id="devices-page-go-btn">Go</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="devices-detail-view" class="hidden">
+          <div class="device-detail-header">
+            <div class="main-header-title">
+              <button class="icon-back-btn" id="device-detail-back-btn" title="Kembali ke daftar perangkat" aria-label="Kembali">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+              </button>
+              <h2 id="device-detail-title">Perangkat</h2>
+            </div>
+            <a id="device-detail-open-link" class="btn secondary" href="#" target="_blank" rel="noopener">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14L21 3"/></svg>
+              Buka Konfigurasi di Perangkat
+            </a>
+          </div>
+          <div class="device-detail-panel">
+            <h3>Informasi Dasar</h3>
+            <div class="field">
+              <label>Access Protocol</label>
+              <div class="field-static">ONVIF / RTSP</div>
+            </div>
+            <div class="field">
+              <label>Alamat (IP)</label>
+              <input id="dd-ip" type="text" placeholder="192.168.1.10" />
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label>Port RTSP</label>
+                <input id="dd-rtsp-port" type="number" value="554" />
+              </div>
+              <div class="field">
+                <label>Port ONVIF</label>
+                <input id="dd-onvif-port" type="number" value="80" />
+              </div>
+            </div>
+            <div class="field">
+              <label>Nama</label>
+              <input id="dd-name" type="text" />
+            </div>
+            <div class="field">
+              <label>User Name</label>
+              <input id="dd-username" type="text" />
+            </div>
+            <div class="field">
+              <label>Password</label>
+              <input id="dd-password" type="password" placeholder="Kosongkan kalau tidak diubah" />
+              <div class="password-strength-meter">
+                <div class="password-strength-bar" id="dd-password-bar"><span></span><span></span><span></span></div>
+                <span class="password-strength-label" id="dd-password-label"></span>
+              </div>
+            </div>
+            <div class="modal-actions">
+              <button class="btn secondary" id="dd-cancel-btn">Cancel</button>
+              <button class="btn" id="dd-save-btn">Save</button>
+            </div>
+            <div class="form-msg" id="dd-form-msg"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="map-subview-list" class="hidden">
         <div class="table-wrap">
           <table>
             <thead><tr><th>Nama</th><th>Alamat</th><th>Koordinat</th><th>Kamera</th><th></th></tr></thead>
@@ -300,145 +386,118 @@
       </div>
     </div>
 
-    <div id="view-recordings" class="hidden">
-      <div class="main-header"><h2>Rekaman</h2></div>
-      <div class="stat-grid" id="recordings-stats"></div>
-
-      <div class="sub-tabs" id="recordings-sub-tabs">
-        <button class="sub-tab active" data-subtab="list">Daftar Rekaman</button>
-        <button class="sub-tab" data-subtab="bookmarks">Bookmark</button>
+    <div id="view-devsrv" class="hidden">
+      <div class="sub-tabs" id="devsrv-sub-tabs">
+        <button class="sub-tab active" data-subtab="recordings">Rekaman</button>
+        <button class="sub-tab" data-subtab="events">Log Peristiwa</button>
+        <button class="sub-tab" data-subtab="health">Kesehatan Kamera</button>
+        <button class="sub-tab" data-subtab="system">Kesehatan Server</button>
       </div>
 
-      <div id="recordings-subview-list">
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Kamera</th><th>File</th><th>Mulai</th><th>Ukuran</th><th></th></tr></thead>
-            <tbody id="recordings-table"></tbody>
-          </table>
+      <div id="devsrv-subview-recordings">
+        <div class="main-header"><h2>Rekaman</h2></div>
+        <div class="stat-grid" id="recordings-stats"></div>
+
+        <div class="sub-tabs" id="recordings-sub-tabs">
+          <button class="sub-tab active" data-subtab="list">Daftar Rekaman</button>
+          <button class="sub-tab" data-subtab="bookmarks">Bookmark</button>
+        </div>
+
+        <div id="recordings-subview-list">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Kamera</th><th>File</th><th>Mulai</th><th>Ukuran</th><th></th></tr></thead>
+              <tbody id="recordings-table"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="recordings-subview-bookmarks" class="hidden">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Kamera</th><th>Waktu</th><th>Catatan</th><th>Dibuat oleh</th><th></th></tr></thead>
+              <tbody id="bookmarks-table"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
-      <div id="recordings-subview-bookmarks" class="hidden">
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Kamera</th><th>Waktu</th><th>Catatan</th><th>Dibuat oleh</th><th></th></tr></thead>
-            <tbody id="bookmarks-table"></tbody>
-          </table>
+      <div id="devsrv-subview-events" class="hidden">
+        <div class="main-header"><h2>Log peristiwa</h2></div>
+        <div class="event-filters" id="event-filters">
+          <button class="chip active" data-filter="all">Semua</button>
+          <button class="chip" data-filter="camera">Kamera</button>
+          <button class="chip" data-filter="stream">Live</button>
+          <button class="chip" data-filter="recording">Rekaman</button>
+          <button class="chip" data-filter="motion">Motion</button>
+          <button class="chip" data-filter="user">User</button>
+          <button class="chip" data-filter="location">Lokasi</button>
+          <button class="chip" data-filter="error">Error</button>
         </div>
+        <div class="events-list" id="events-table"></div>
       </div>
-    </div>
 
-    <div id="view-events" class="hidden">
-      <div class="main-header"><h2>Log peristiwa</h2></div>
-      <div class="event-filters" id="event-filters">
-        <button class="chip active" data-filter="all">Semua</button>
-        <button class="chip" data-filter="camera">Kamera</button>
-        <button class="chip" data-filter="stream">Live</button>
-        <button class="chip" data-filter="recording">Rekaman</button>
-        <button class="chip" data-filter="motion">Motion</button>
-        <button class="chip" data-filter="user">User</button>
-        <button class="chip" data-filter="location">Lokasi</button>
-        <button class="chip" data-filter="error">Error</button>
-      </div>
-      <div class="events-list" id="events-table"></div>
-    </div>
-
-    <div id="view-devices" class="hidden">
-      <div id="devices-list-view">
+      <div id="devsrv-subview-health" class="hidden">
         <div class="main-header">
-          <h2>Perangkat</h2>
-          <button class="btn secondary" id="device-probe-all-btn" title="Ambil No. Seri &amp; Versi Firmware dari semua perangkat lewat ONVIF">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-            Probe Semua
-          </button>
-          <button class="btn" id="device-add-btn">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-            Tambah kamera
-          </button>
-        </div>
-        <div class="camera-search">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
-          <input id="device-search-input" type="text" placeholder="Cari perangkat (nama, IP, No. Seri)..." />
-          <button id="device-search-clear" class="hidden" title="Hapus pencarian">
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-          </button>
-        </div>
-        <div class="table-wrap" id="devices-table-wrap">
-          <table>
-            <thead><tr><th>Nama</th><th>Alamat</th><th>No. Seri</th><th>Versi Firmware</th><th>Channel</th><th>Status Jaringan</th><th>Kekuatan Password</th><th></th></tr></thead>
-            <tbody id="devices-table"></tbody>
-          </table>
-        </div>
-        <div class="pagination-bar">
-          <span id="devices-total-label">Total: 0</span>
-          <select id="devices-page-size">
-            <option value="25">25 /Halaman</option>
-            <option value="50" selected>50 /Halaman</option>
-            <option value="100">100 /Halaman</option>
-            <option value="200">200 /Halaman</option>
-          </select>
-          <div class="pagination-bar-goto">
-            <input id="devices-page-input" type="number" min="1" value="1" />
-            <span id="devices-page-total">/ 1</span>
-            <button class="btn secondary" id="devices-page-go-btn">Go</button>
+          <h2>Kesehatan Kamera</h2>
+          <div class="header-actions" id="health-range-picker">
+            <button type="button" class="chip" data-days="1">24 Jam</button>
+            <button type="button" class="chip active" data-days="7">7 Hari</button>
+            <button type="button" class="chip" data-days="30">30 Hari</button>
           </div>
+        </div>
+
+        <div class="stat-grid" id="health-stats"></div>
+
+        <div class="table-wrap health-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Kamera</th>
+                <th>Lokasi</th>
+                <th>Status</th>
+                <th>Uptime</th>
+                <th>Downtime</th>
+                <th>Offline</th>
+                <th>Timeline</th>
+              </tr>
+            </thead>
+            <tbody id="health-trends-tbody"></tbody>
+          </table>
         </div>
       </div>
 
-      <div id="devices-detail-view" class="hidden">
-        <div class="device-detail-header">
-          <div class="main-header-title">
-            <button class="icon-back-btn" id="device-detail-back-btn" title="Kembali ke daftar perangkat" aria-label="Kembali">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-            </button>
-            <h2 id="device-detail-title">Perangkat</h2>
+      <div id="devsrv-subview-system" class="hidden">
+        <div class="main-header">
+          <h2>Kesehatan Server</h2>
+          <div class="header-actions">
+            <span class="sys-sampled-at" id="sys-sampled-at"></span>
           </div>
-          <a id="device-detail-open-link" class="btn secondary" href="#" target="_blank" rel="noopener">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14L21 3"/></svg>
-            Buka Konfigurasi di Perangkat
-          </a>
         </div>
-        <div class="device-detail-panel">
-          <h3>Informasi Dasar</h3>
-          <div class="field">
-            <label>Access Protocol</label>
-            <div class="field-static">ONVIF / RTSP</div>
+
+        <div class="stat-grid" id="sys-stats"></div>
+
+        <div class="dashboard-panel">
+          <h3>Penggunaan CPU</h3>
+          <div class="sys-meter-row">
+            <div class="sys-meter"><div class="sys-meter-fill" id="sys-cpu-fill"></div></div>
+            <span class="sys-meter-value" id="sys-cpu-value">-</span>
           </div>
-          <div class="field">
-            <label>Alamat (IP)</label>
-            <input id="dd-ip" type="text" placeholder="192.168.1.10" />
+          <div class="sys-core-grid" id="sys-core-grid"></div>
+        </div>
+
+        <div class="dashboard-panel">
+          <h3>Penggunaan RAM</h3>
+          <div class="sys-meter-row">
+            <div class="sys-meter"><div class="sys-meter-fill" id="sys-mem-fill"></div></div>
+            <span class="sys-meter-value" id="sys-mem-value">-</span>
           </div>
-          <div class="field-row">
-            <div class="field">
-              <label>Port RTSP</label>
-              <input id="dd-rtsp-port" type="number" value="554" />
-            </div>
-            <div class="field">
-              <label>Port ONVIF</label>
-              <input id="dd-onvif-port" type="number" value="80" />
-            </div>
-          </div>
-          <div class="field">
-            <label>Nama</label>
-            <input id="dd-name" type="text" />
-          </div>
-          <div class="field">
-            <label>User Name</label>
-            <input id="dd-username" type="text" />
-          </div>
-          <div class="field">
-            <label>Password</label>
-            <input id="dd-password" type="password" placeholder="Kosongkan kalau tidak diubah" />
-            <div class="password-strength-meter">
-              <div class="password-strength-bar" id="dd-password-bar"><span></span><span></span><span></span></div>
-              <span class="password-strength-label" id="dd-password-label"></span>
-            </div>
-          </div>
-          <div class="modal-actions">
-            <button class="btn secondary" id="dd-cancel-btn">Cancel</button>
-            <button class="btn" id="dd-save-btn">Save</button>
-          </div>
-          <div class="form-msg" id="dd-form-msg"></div>
+          <div class="sys-mem-detail" id="sys-mem-detail"></div>
+        </div>
+
+        <div class="dashboard-panel">
+          <h3>Informasi Server</h3>
+          <div class="about-grid" id="sys-info-grid"></div>
         </div>
       </div>
     </div>
@@ -793,35 +852,6 @@
       </div>
     </div>
 
-    <div id="view-health" class="hidden">
-      <div class="main-header">
-        <h2>Kesehatan Kamera</h2>
-        <div class="header-actions" id="health-range-picker">
-          <button type="button" class="chip" data-days="1">24 Jam</button>
-          <button type="button" class="chip active" data-days="7">7 Hari</button>
-          <button type="button" class="chip" data-days="30">30 Hari</button>
-        </div>
-      </div>
-
-      <div class="stat-grid" id="health-stats"></div>
-
-      <div class="table-wrap health-table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Kamera</th>
-              <th>Lokasi</th>
-              <th>Status</th>
-              <th>Uptime</th>
-              <th>Downtime</th>
-              <th>Offline</th>
-              <th>Timeline</th>
-            </tr>
-          </thead>
-          <tbody id="health-trends-tbody"></tbody>
-        </table>
-      </div>
-    </div>
   </div>
 </div>
 
@@ -885,6 +915,10 @@
     <div class="field">
       <label>RTSP path manual (opsional, jika tidak pakai ONVIF probe) — isi hanya path-nya, contoh: <code>/Streaming/Channels/101</code>, jangan tempel URL rtsp:// lengkap</label>
       <input id="cam-rtsp-path" type="text" placeholder="/Streaming/Channels/101" />
+    </div>
+    <div class="field">
+      <label>Sub stream path (opsional) — feed resolusi rendah bawaan kamera, dipakai khusus untuk grid Live View agar lebih ringan di CPU, contoh: <code>/Streaming/Channels/102</code>. Kosongkan jika kamera tidak punya sub stream — grid akan pakai main stream seperti biasa</label>
+      <input id="cam-rtsp-path-sub" type="text" placeholder="/Streaming/Channels/102" />
     </div>
     <div class="field-row">
       <div class="field">

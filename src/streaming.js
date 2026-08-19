@@ -42,9 +42,38 @@ const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 30000;
 const STABLE_AFTER_MS = 10000; // running this long without exiting counts as "recovered"
 
-// Map cameraId -> { process, viewers, startedAt, encoder, alive, stopRequested, reconnecting, retryCount, reconnectTimer, stableTimer }
+// stopStream() is refcounted on `viewers`, which relies on the frontend
+// always pairing every stream/start with a stream/stop — a crashed tab,
+// killed browser process, or lost network right as the stop request goes
+// out never decrements it, so the ffmpeg process (and its memory) runs
+// forever with a phantom viewer nobody will ever release. lastAccessedAt
+// (touched by every real HLS playlist/segment request, wired up in
+// index.js's /streams middleware) is ground truth for "is anyone actually
+// watching" independent of that refcount — if nothing has fetched a
+// segment in this long, sweepIdleStreams() below force-stops it regardless
+// of what `viewers` claims.
+// 5 minutes (not seconds) deliberately: renderGrid()'s pagination
+// deliberately leaves a paginated-off tile's stream running server-side
+// with stopLoad() called client-side (see public/app.js) so flipping back
+// resumes instantly — too short a timeout would kill that camera out from
+// under a user who's just looking at a different page for a bit, forcing
+// a manual re-start click. 5 minutes is generous enough not to punish
+// normal page-flipping while still reclaiming a tab that's actually gone.
+const IDLE_TIMEOUT_MS = Number(process.env.STREAM_IDLE_TIMEOUT_MS) || 5 * 60 * 1000;
+const IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
+
+// Keyed by `${cameraId}:${profile}` — 'main' (full quality, focus/fullscreen
+// view + recording) and 'sub' (camera's own lower-res feed, Live View grid)
+// run as fully independent ffmpeg processes/entries so starting one never
+// affects the other. Value: { process, viewers, startedAt, lastAccessedAt,
+// encoder, alive, stopRequested, reconnecting, retryCount, reconnectTimer,
+// stableTimer }
 const activeStreams = new Map();
 const lastErrorByCamera = new Map();
+
+function streamKey(cameraId, profile) {
+  return `${cameraId}:${profile}`;
+}
 // QSV is a host-level hardware capability, not a per-camera one: once it's
 // proven unusable on this machine (no iGPU/driver), it will fail for every
 // camera and every future reconnect the same way. Remembering that avoids
@@ -81,24 +110,40 @@ let activeQsvCount = 0;
 // Scales with actual core count so the same code doesn't need retuning
 // per-deployment; override with SOFTWARE_CONCURRENCY_LIMIT if the
 // empirical sweet spot for a given host differs.
-const SOFTWARE_CONCURRENCY_LIMIT = Number(process.env.SOFTWARE_CONCURRENCY_LIMIT) || Math.max(2, os.cpus().length * 3);
+// Capped at 10 regardless of core count: on a 14-core Windows dev box,
+// cpus*3 (42) let "Nyalakan Semua" across 200 cameras — many with bad
+// credentials/unreachable IPs/codec errors that fail and reconnect every
+// few seconds forever — burst far more concurrent spawn() calls than
+// Windows' process-creation subsystem tolerates, surfacing as
+// `Error: spawn UNKNOWN` (errno -4094) and zero ffmpeg processes actually
+// running. The limit's job is bounding concurrent spawn attempts, not
+// concurrent CPU-seconds, so a flat ceiling matters more than raw core
+// count once core count gets large; low-core hosts are still protected by
+// the *2 floor below.
+const SOFTWARE_CONCURRENCY_LIMIT = Number(process.env.SOFTWARE_CONCURRENCY_LIMIT) || Math.max(2, Math.min(os.cpus().length * 3, 10));
 let activeSoftwareCount = 0;
 // FIFO of { camera, entry } waiting for a software encode slot to free up.
 const softwareQueue = [];
 
 function drainSoftwareQueue() {
   while (softwareQueue.length > 0 && activeSoftwareCount < SOFTWARE_CONCURRENCY_LIMIT) {
-    const { camera, entry } = softwareQueue.shift();
-    if (entry.stopRequested || !activeStreams.has(camera.id)) continue;
+    const { camera, entry, profile } = softwareQueue.shift();
+    if (entry.stopRequested || !activeStreams.has(streamKey(camera.id, profile))) continue;
     // Re-fetch: credentials/settings may have changed while this camera sat
     // in queue, same reasoning as the reconnect-timer re-fetch below.
     const fresh = getCameraById(camera.id) || camera;
-    spawnEncoder(fresh, entry, 'x264');
+    spawnEncoder(fresh, entry, 'x264', profile);
   }
 }
 
-function streamDirFor(cameraId) {
-  return path.join(STREAMS_DIR, String(cameraId));
+// profile 'main' keeps the original, pre-sub-stream directory layout
+// (public/streams/<id>/) so existing playlist URLs/bookmarks/clients don't
+// break. 'sub' gets its own nested folder so the two profiles' HLS segments
+// never collide.
+function streamDirFor(cameraId, profile = 'main') {
+  return profile === 'sub'
+    ? path.join(STREAMS_DIR, String(cameraId), 'sub')
+    : path.join(STREAMS_DIR, String(cameraId));
 }
 
 // -hls_flags delete_segments only prunes segments *this* ffmpeg process
@@ -126,7 +171,7 @@ function clearStreamDir(dir) {
 
 const HLS_SEGMENT_SECONDS = 2;
 
-function buildArgs(camera, dir, playlistPath, encoder) {
+function buildArgs(camera, dir, playlistPath, encoder, rtspUrl) {
   const maxWidth = Number(settings.getSetting('stream_max_width')) || 960;
   const fps = Number(settings.getSetting('stream_fps')) || 15;
   const scale = `scale=w='min(${maxWidth},iw)':h=-2:flags=fast_bilinear`;
@@ -176,7 +221,7 @@ function buildArgs(camera, dir, playlistPath, encoder) {
     // to (Ubuntu 4.4.2 vs newer 8.x builds) disagree on which name is even
     // valid, let alone what it means.
     RTSP_TIMEOUT_FLAG, '10000000', // microseconds
-    '-i', camera.rtsp_url,
+    '-i', rtspUrl,
     ...encoderArgs,
     // -r forces a framerate conversion, which (like -vf) requires decoding —
     // invalid alongside -c:v copy, so the camera's native fps is kept as-is.
@@ -224,10 +269,10 @@ function withJitter(delayMs) {
 // into HLS (-c:v copy): near-zero CPU cost, so it doesn't compete for either
 // concurrency slot at all (see spawnEncoder). Cameras already sending H.265
 // or anything else still go through the normal QSV/x264 path.
-const videoCodecByCamera = new Map(); // cameraId -> { rtspUrl, codec: 'h264' | 'other' }
+const videoCodecByCamera = new Map(); // `${cameraId}:${profile}` -> { rtspUrl, codec: 'h264' | 'other' }
 const codecProbeInFlight = new Set();
 
-function probeVideoCodec(camera) {
+function probeVideoCodec(rtspUrl) {
   return new Promise((resolve) => {
     const args = [
       '-v', 'error',
@@ -236,7 +281,7 @@ function probeVideoCodec(camera) {
       '-select_streams', 'v:0',
       '-show_entries', 'stream=codec_name',
       '-of', 'csv=p=0',
-      camera.rtsp_url,
+      rtspUrl,
     ];
     let out = '';
     let proc;
@@ -254,34 +299,45 @@ function probeVideoCodec(camera) {
 
 // Fire-and-forget: caches the result for the *next* start/reconnect attempt
 // rather than blocking the current one on an extra RTSP round-trip. A single
-// in-flight probe per camera, since reconnect attempts can pile up quickly
-// (2s base backoff) and each one would otherwise kick off its own ffprobe.
-function ensureCodecProbed(camera) {
-  if (codecProbeInFlight.has(camera.id)) return;
-  codecProbeInFlight.add(camera.id);
-  probeVideoCodec(camera)
+// in-flight probe per camera+profile, since reconnect attempts can pile up
+// quickly (2s base backoff) and each one would otherwise kick off its own
+// ffprobe.
+function ensureCodecProbed(camera, profile, rtspUrl) {
+  const key = streamKey(camera.id, profile);
+  if (codecProbeInFlight.has(key)) return;
+  codecProbeInFlight.add(key);
+  probeVideoCodec(rtspUrl)
     .then((codecName) => {
-      videoCodecByCamera.set(camera.id, {
-        rtspUrl: camera.rtsp_url,
+      videoCodecByCamera.set(key, {
+        rtspUrl,
         codec: codecName === 'h264' ? 'h264' : 'other',
       });
     })
-    .finally(() => codecProbeInFlight.delete(camera.id));
+    .finally(() => codecProbeInFlight.delete(key));
 }
 
-function preferredEncoder(camera) {
-  const cached = camera && videoCodecByCamera.get(camera.id);
-  if (cached && cached.rtspUrl === camera.rtsp_url) {
+function preferredEncoder(camera, profile, rtspUrl) {
+  const cached = camera && videoCodecByCamera.get(streamKey(camera.id, profile));
+  if (cached && cached.rtspUrl === rtspUrl) {
     if (cached.codec === 'h264') return 'copy';
   } else if (camera) {
-    ensureCodecProbed(camera);
+    ensureCodecProbed(camera, profile, rtspUrl);
   }
   if (settings.getSetting('hwaccel_mode') === 'software' || qsvKnownUnavailable) return 'x264';
   if (activeQsvCount >= QSV_CONCURRENCY_LIMIT) return 'x264';
   return 'qsv';
 }
 
-function spawnEncoder(camera, entry, encoder) {
+// Sub stream falls back to the main stream's URL when no sub URL is
+// configured — same behavior as before this feature existed for any camera
+// that hasn't set one up.
+function rtspUrlFor(camera, profile) {
+  return profile === 'sub' ? (camera.rtsp_url_sub || camera.rtsp_url) : camera.rtsp_url;
+}
+
+function spawnEncoder(camera, entry, encoder, profile = 'main') {
+  const key = streamKey(camera.id, profile);
+  const rtspUrl = rtspUrlFor(camera, profile);
   // Software slot check happens before anything else spawns/allocates —
   // if the box is already at SOFTWARE_CONCURRENCY_LIMIT, park this camera
   // in the queue instead of starting a 115th ffmpeg process. It gets
@@ -293,17 +349,17 @@ function spawnEncoder(camera, entry, encoder) {
     entry.reconnecting = true;
     if (!entry.queued) {
       entry.queued = true;
-      lastErrorByCamera.set(camera.id, `Menunggu slot software encoder tersedia (${SOFTWARE_CONCURRENCY_LIMIT} sedang dipakai)`);
-      logEvent(camera.id, 'stream_reconnecting', `Live stream mengantre — batas ${SOFTWARE_CONCURRENCY_LIMIT} software encoder bersamaan sedang penuh`);
+      lastErrorByCamera.set(key, `Menunggu slot software encoder tersedia (${SOFTWARE_CONCURRENCY_LIMIT} sedang dipakai)`);
+      logEvent(camera.id, 'stream_reconnecting', `Live stream (${profile}) mengantre — batas ${SOFTWARE_CONCURRENCY_LIMIT} software encoder bersamaan sedang penuh`);
     }
-    softwareQueue.push({ camera, entry });
+    softwareQueue.push({ camera, entry, profile });
     return;
   }
   entry.queued = false;
 
-  const dir = streamDirFor(camera.id);
+  const dir = streamDirFor(camera.id, profile);
   const playlistPath = path.join(dir, 'index.m3u8');
-  const args = buildArgs(camera, dir, playlistPath, encoder);
+  const args = buildArgs(camera, dir, playlistPath, encoder, rtspUrl);
 
   clearStreamDir(dir);
 
@@ -353,22 +409,22 @@ function spawnEncoder(camera, entry, encoder) {
     entry.retryCount = 0;
     // A prior failure's message would otherwise stick around in the UI
     // forever, showing "error" next to a camera that has since recovered.
-    lastErrorByCamera.delete(camera.id);
+    lastErrorByCamera.delete(key);
   }, STABLE_AFTER_MS);
 
   proc.on('error', (err) => {
     releaseQsvSlot();
     releaseSoftwareSlot();
     entry.alive = false;
-    activeStreams.delete(camera.id);
-    logEvent(camera.id, 'stream_error', `Gagal menjalankan ffmpeg: ${err.message}`);
+    activeStreams.delete(key);
+    logEvent(camera.id, 'stream_error', `Gagal menjalankan ffmpeg (${profile}): ${err.message}`);
   });
 
   proc.stderr.on('data', (chunk) => {
     // ffmpeg logs go to stderr by default; keep last error line for diagnostics
     const text = chunk.toString();
     if (/error|fail/i.test(text)) {
-      lastErrorByCamera.set(camera.id, text.trim().slice(-500));
+      lastErrorByCamera.set(key, text.trim().slice(-500));
     }
   });
 
@@ -380,8 +436,8 @@ function spawnEncoder(camera, entry, encoder) {
     const ranMs = Date.now() - startedAt;
 
     if (entry.stopRequested) {
-      activeStreams.delete(camera.id);
-      logEvent(camera.id, 'stream_stopped', 'Live stream dihentikan');
+      activeStreams.delete(key);
+      logEvent(camera.id, 'stream_stopped', `Live stream (${profile}) dihentikan`);
       return;
     }
 
@@ -392,8 +448,8 @@ function spawnEncoder(camera, entry, encoder) {
     if (encoder === 'qsv' && code !== 0 && ranMs < 4000 && !fellBack) {
       fellBack = true;
       qsvKnownUnavailable = true;
-      logEvent(camera.id, 'stream_error', 'Hardware encoder (QSV) gagal, beralih ke software (libx264)');
-      spawnEncoder(camera, entry, 'x264');
+      logEvent(camera.id, 'stream_error', `Hardware encoder (QSV) gagal (${profile}), beralih ke software (libx264)`);
+      spawnEncoder(camera, entry, 'x264', profile);
       return;
     }
 
@@ -405,10 +461,10 @@ function spawnEncoder(camera, entry, encoder) {
     // normal encode for this attempt so the camera isn't left dark.
     if (encoder === 'copy' && code !== 0 && ranMs < 4000 && !fellBack) {
       fellBack = true;
-      videoCodecByCamera.delete(camera.id);
-      logEvent(camera.id, 'stream_error', 'Mode copy (tanpa re-encode) gagal, beralih ke re-encode');
+      videoCodecByCamera.delete(key);
+      logEvent(camera.id, 'stream_error', `Mode copy (tanpa re-encode) gagal (${profile}), beralih ke re-encode`);
       const fallbackEncoder = (settings.getSetting('hwaccel_mode') === 'software' || qsvKnownUnavailable || activeQsvCount >= QSV_CONCURRENCY_LIMIT) ? 'x264' : 'qsv';
-      spawnEncoder(camera, entry, fallbackEncoder);
+      spawnEncoder(camera, entry, fallbackEncoder, profile);
       return;
     }
 
@@ -423,23 +479,25 @@ function spawnEncoder(camera, entry, encoder) {
     const delay = withJitter(Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (entry.retryCount - 1)));
     entry.reconnecting = true;
     if (shouldLogRetry(entry.retryCount)) {
-      logEvent(camera.id, 'stream_reconnecting', `Live stream terputus, mencoba sambung ulang dalam ${Math.round(delay / 1000)}s (percobaan ke-${entry.retryCount})`);
+      logEvent(camera.id, 'stream_reconnecting', `Live stream (${profile}) terputus, mencoba sambung ulang dalam ${Math.round(delay / 1000)}s (percobaan ke-${entry.retryCount})`);
     }
     entry.reconnectTimer = setTimeout(() => {
-      if (!activeStreams.has(camera.id) || entry.stopRequested) return;
+      if (!activeStreams.has(key) || entry.stopRequested) return;
       // Re-fetch instead of reusing the closed-over `camera` — otherwise an
       // admin fixing a wrong password (or IP/RTSP path) via the Edit form
       // has no effect on a stream that's already mid-retry: every future
       // attempt keeps reusing the credentials it started with.
       const fresh = getCameraById(camera.id) || camera;
-      spawnEncoder(fresh, entry, preferredEncoder(fresh));
+      const freshUrl = rtspUrlFor(fresh, profile);
+      spawnEncoder(fresh, entry, preferredEncoder(fresh, profile, freshUrl), profile);
     }, delay);
   });
 }
 
-function startStream(camera) {
-  if (activeStreams.has(camera.id)) {
-    const existing = activeStreams.get(camera.id);
+function startStream(camera, profile = 'main') {
+  const key = streamKey(camera.id, profile);
+  if (activeStreams.has(key)) {
+    const existing = activeStreams.get(key);
     existing.viewers += 1;
     // A prior stopStream() may have set this while its SIGTERM'd process was
     // still exiting. If a new viewer starts watching before that exit event
@@ -450,13 +508,14 @@ function startStream(camera) {
     return existing;
   }
 
-  const dir = streamDirFor(camera.id);
+  const dir = streamDirFor(camera.id, profile);
   fs.mkdirSync(dir, { recursive: true });
 
   const entry = {
     process: null,
     viewers: 1,
     startedAt: Date.now(),
+    lastAccessedAt: Date.now(),
     encoder: null,
     alive: false,
     stopRequested: false,
@@ -465,14 +524,16 @@ function startStream(camera) {
     reconnectTimer: null,
     stableTimer: null,
   };
-  activeStreams.set(camera.id, entry);
-  spawnEncoder(camera, entry, preferredEncoder(camera));
-  logEvent(camera.id, 'stream_started', 'Live stream dimulai');
+  activeStreams.set(key, entry);
+  const rtspUrl = rtspUrlFor(camera, profile);
+  spawnEncoder(camera, entry, preferredEncoder(camera, profile, rtspUrl), profile);
+  logEvent(camera.id, 'stream_started', `Live stream (${profile}) dimulai`);
   return entry;
 }
 
-function stopStream(cameraId) {
-  const entry = activeStreams.get(cameraId);
+function stopStream(cameraId, profile = 'main') {
+  const key = streamKey(cameraId, profile);
+  const entry = activeStreams.get(key);
   if (!entry) return false;
   entry.viewers -= 1;
   if (entry.viewers <= 0) {
@@ -485,8 +546,8 @@ function stopStream(cameraId) {
     if (entry.alive && entry.process) {
       entry.process.kill('SIGTERM'); // exit handler finishes cleanup + logs stream_stopped
     } else {
-      activeStreams.delete(cameraId); // mid-backoff wait, no live process to kill
-      logEvent(cameraId, 'stream_stopped', 'Live stream dihentikan');
+      activeStreams.delete(key); // mid-backoff wait, no live process to kill
+      logEvent(cameraId, 'stream_stopped', `Live stream (${profile}) dihentikan`);
     }
   }
   return true;
@@ -498,9 +559,17 @@ function stopStream(cameraId) {
 // directory right after a bare SIGTERM races the still-exiting process for
 // its open file handles (throws EBUSY/EPERM on Windows), leaving the
 // directory orphaned since the camera row is gone by the time anyone would
-// retry.
-function stopStreamAndWait(cameraId) {
-  const entry = activeStreams.get(cameraId);
+// retry. When profile is omitted, stops both profiles — the delete route
+// wants everything for this camera gone, not just one stream.
+function stopStreamAndWait(cameraId, profile) {
+  if (!profile) {
+    return Promise.all([
+      stopStreamAndWait(cameraId, 'main'),
+      stopStreamAndWait(cameraId, 'sub'),
+    ]);
+  }
+  const key = streamKey(cameraId, profile);
+  const entry = activeStreams.get(key);
   if (!entry) return Promise.resolve();
   entry.stopRequested = true;
   if (entry.reconnectTimer) {
@@ -509,8 +578,8 @@ function stopStreamAndWait(cameraId) {
   }
   if (entry.stableTimer) clearTimeout(entry.stableTimer);
   if (!entry.alive || !entry.process) {
-    activeStreams.delete(cameraId); // not running (mid-backoff wait or already stopped)
-    logEvent(cameraId, 'stream_stopped', 'Live stream dihentikan');
+    activeStreams.delete(key); // not running (mid-backoff wait or already stopped)
+    logEvent(cameraId, 'stream_stopped', `Live stream (${profile}) dihentikan`);
     return Promise.resolve();
   }
   return new Promise((resolve) => {
@@ -519,20 +588,24 @@ function stopStreamAndWait(cameraId) {
   });
 }
 
-function getStatus(cameraId) {
-  const entry = activeStreams.get(cameraId);
+// Reports the 'main' profile by default so existing callers (dashboard grid
+// status, before sub streams existed) keep seeing the same shape as before.
+// Pass profile explicitly to check the other one.
+function getStatus(cameraId, profile = 'main') {
+  const key = streamKey(cameraId, profile);
+  const entry = activeStreams.get(key);
   return {
     active: entry ? entry.alive : false,
     reconnecting: entry ? !!entry.reconnecting : false,
     queued: entry ? !!entry.queued : false,
     viewers: entry ? entry.viewers : 0,
     encoder: entry ? entry.encoder : null,
-    lastError: lastErrorByCamera.get(cameraId) || null
+    lastError: lastErrorByCamera.get(key) || null
   };
 }
 
 function stopAll() {
-  for (const [id, entry] of activeStreams) {
+  for (const [key, entry] of activeStreams) {
     entry.stopRequested = true;
     if (entry.reconnectTimer) clearTimeout(entry.reconnectTimer);
     if (entry.stableTimer) clearTimeout(entry.stableTimer);
@@ -541,4 +614,35 @@ function stopAll() {
   activeStreams.clear();
 }
 
-module.exports = { startStream, stopStream, stopStreamAndWait, getStatus, stopAll, streamDirFor };
+// Called from index.js on every /streams/<id>/(sub/)?... request — i.e. once
+// per real HLS playlist or segment fetch. Silently no-ops for keys with no
+// active entry (stale/expired URLs, streams already stopped).
+function touchStream(cameraId, profile) {
+  const entry = activeStreams.get(streamKey(cameraId, profile));
+  if (entry) entry.lastAccessedAt = Date.now();
+}
+
+function sweepIdleStreams() {
+  const now = Date.now();
+  for (const [key, entry] of activeStreams) {
+    if (entry.stopRequested) continue;
+    if (now - (entry.lastAccessedAt || entry.startedAt) < IDLE_TIMEOUT_MS) continue;
+    const [cameraIdStr, profile] = key.split(':');
+    const cameraId = Number(cameraIdStr);
+    entry.stopRequested = true;
+    if (entry.reconnectTimer) {
+      clearTimeout(entry.reconnectTimer);
+      entry.reconnectTimer = null;
+    }
+    if (entry.stableTimer) clearTimeout(entry.stableTimer);
+    if (entry.alive && entry.process) {
+      entry.process.kill('SIGTERM'); // exit handler finishes cleanup (sees stopRequested, logs stream_stopped)
+    } else {
+      activeStreams.delete(key); // mid-backoff wait, no live process to kill
+    }
+    logEvent(cameraId, 'stream_idle_timeout', `Live stream (${profile}) dihentikan otomatis — tidak ada aktivitas selama ${Math.round(IDLE_TIMEOUT_MS / 60000)} menit (kemungkinan tab browser ditutup tanpa berhenti dengan benar)`);
+  }
+}
+setInterval(sweepIdleStreams, IDLE_SWEEP_INTERVAL_MS).unref();
+
+module.exports = { startStream, stopStream, stopStreamAndWait, getStatus, stopAll, streamDirFor, touchStream };
