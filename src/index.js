@@ -71,7 +71,15 @@ app.get('/api/branding', (req, res) => {
 });
 
 // Static frontend
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// no-cache (not no-store) on the app shell: browsers still revalidate via
+// ETag on every load (cheap 304 if unchanged) instead of serving a
+// possibly-days-stale cached copy after a deploy with no way to force a
+// refresh short of the user manually hard-refreshing.
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  setHeaders: (res, filePath) => {
+    if (/\.(html|js|css)$/.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
+  },
+}));
 
 // HLS live-stream segments (served publicly since they're short-lived/ephemeral;
 // put behind auth/reverse-proxy in production if streams are sensitive)

@@ -3,6 +3,10 @@ const bcrypt = require('bcryptjs');
 const { db, logEvent } = require('./db');
 const router = express.Router();
 
+function countOtherAdmins(excludeId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM users WHERE role = ? AND id != ?').get('admin', excludeId).n;
+}
+
 router.get('/', (req, res) => {
   const users = db.prepare('SELECT id, username, role, created_at FROM users ORDER BY id').all();
   res.json(users);
@@ -36,6 +40,9 @@ router.put('/:id', (req, res) => {
   }
   if (role) {
     if (!['admin', 'operator', 'viewer'].includes(role)) return res.status(400).json({ error: 'role tidak valid' });
+    if (user.role === 'admin' && role !== 'admin' && countOtherAdmins(id) === 0) {
+      return res.status(400).json({ error: 'Tidak bisa menurunkan role admin terakhir' });
+    }
     updates.push('role = ?');
     values.push(role);
   }
@@ -49,8 +56,11 @@ router.put('/:id', (req, res) => {
 
 router.delete('/:id', (req, res) => {
   const id = Number(req.params.id);
-  const user = db.prepare('SELECT username FROM users WHERE id = ?').get(id);
+  const user = db.prepare('SELECT username, role FROM users WHERE id = ?').get(id);
   if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+  if (user.role === 'admin' && countOtherAdmins(id) === 0) {
+    return res.status(400).json({ error: 'Tidak bisa menghapus admin terakhir' });
+  }
   db.prepare('DELETE FROM users WHERE id = ?').run(id);
   logEvent(null, 'user_deleted', `User ${user.username} dihapus`, req.user);
   res.json({ ok: true });

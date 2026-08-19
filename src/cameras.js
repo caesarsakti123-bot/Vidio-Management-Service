@@ -9,11 +9,31 @@ const streaming = require('./streaming');
 const recording = require('./recording');
 const motion = require('./motion');
 const relay = require('./relay');
+const healthcheck = require('./healthcheck');
 
 const router = express.Router();
 
 function generateRelayToken() {
   return crypto.randomBytes(24).toString('hex');
+}
+
+// `Number(x) || 0.04` would silently replace an explicit 0 (max sensitivity)
+// with the default, since 0 is falsy — only fall back when the value is
+// genuinely missing or non-numeric.
+function normalizeMotionSensitivity(value) {
+  const n = Number(value);
+  return value === undefined || value === null || value === '' || !Number.isFinite(n) ? 0.04 : n;
+}
+
+// Rough heuristic for the "Password strength" column (device inventory
+// hygiene indicator, not a real password policy) — never returns or logs the
+// password itself, only a weak/medium/strong classification.
+function passwordStrength(password) {
+  if (!password) return 'weak';
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((re) => re.test(password)).length;
+  if (password.length >= 10 && classes >= 3) return 'strong';
+  if (password.length >= 8 && classes >= 2) return 'medium';
+  return 'weak';
 }
 
 // Derives a site code from a camera name so cameras belonging to the same
@@ -86,12 +106,15 @@ function sanitizeName(name) {
 // ---- CRUD ----
 
 router.get('/', (req, res) => {
-  const cameras = db.prepare('SELECT id, name, brand, ip, rtsp_port, onvif_port, username, rtsp_path, rtsp_url, ptz_supported, recording_enabled, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token FROM cameras ORDER BY sort_order ASC, id ASC').all();
+  const cameras = db.prepare('SELECT id, name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, ptz_supported, recording_enabled, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token, serial_number, firmware_version, channel_count FROM cameras ORDER BY sort_order ASC, id ASC').all();
   const isViewer = req.user.role === 'viewer';
   const withStatus = cameras.map(c => {
     const rtspUrl = decrypt(c.rtsp_url);
+    // password itself never leaves this function for any role — only the
+    // derived strength label does (see passwordStrength() above).
+    const { password, ...rest } = c;
     return {
-      ...c,
+      ...rest,
       // rtsp_url embeds the camera's password — admins/operators need the
       // real thing (editing, building relay-agent commands); viewers just
       // need to know one is configured, not to see the credential.
@@ -109,6 +132,8 @@ router.get('/', (req, res) => {
       // The token is a bearer credential for pushing video — only admins/operators
       // (who can also see the setup instructions) get it back over the API.
       relay_token: isViewer ? null : c.relay_token,
+      network_status: healthcheck.isOnline(c.id) ? 'online' : 'offline',
+      password_strength: passwordStrength(decrypt(password)),
     };
   });
   res.json(withStatus);
@@ -149,7 +174,7 @@ router.post('/', requireRole(['admin', 'operator']), (req, res) => {
     encrypt(finalRtspUrl),
     ptz_supported ? 1 : 0,
     motion_detection_enabled ? 1 : 0,
-    Number(motion_sensitivity) || 0.04,
+    normalizeMotionSensitivity(motion_sensitivity),
     motion_recording_enabled ? 1 : 0,
     finalLocationId,
     building,
@@ -174,12 +199,16 @@ router.put('/reorder', requireRole(['admin', 'operator']), (req, res) => {
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'items harus berupa array berisi {id, sort_order}' });
   }
+  const validRows = items.filter((row) => Number.isInteger(Number(row.id)) && Number.isInteger(Number(row.sort_order)));
+  if (validRows.length === 0) {
+    return res.status(400).json({ error: 'items tidak valid' });
+  }
   const stmt = db.prepare('UPDATE cameras SET sort_order = ? WHERE id = ?');
   const applyAll = db.transaction((rows) => {
     for (const row of rows) stmt.run(Number(row.sort_order), Number(row.id));
   });
-  applyAll(items);
-  res.json({ ok: true });
+  applyAll(validRows);
+  res.json({ ok: true, applied: validRows.length, skipped: items.length - validRows.length });
 });
 
 // Must be registered before /:id, same reason as /reorder above.
@@ -216,7 +245,7 @@ router.put('/bulk', requireRole(['admin', 'operator']), (req, res) => {
       return req.body[f] ? 1 : 0;
     }
     if (f === 'motion_sensitivity') {
-      return Number(req.body[f]) || 0.04;
+      return normalizeMotionSensitivity(req.body[f]);
     }
     return req.body[f];
   });
@@ -320,7 +349,7 @@ router.put('/:id', requireRole(['admin', 'operator']), (req, res) => {
       return req.body[f] ? 1 : 0;
     }
     if (f === 'motion_sensitivity') {
-      return Number(req.body[f]) || 0.04;
+      return normalizeMotionSensitivity(req.body[f]);
     }
     if (f === 'relay_token') {
       return generateRelayToken();
@@ -401,26 +430,41 @@ router.post('/:id/onvif/probe', requireRole(['admin', 'operator']), async (req, 
       responded = true;
       return res.status(502).json({ error: `Gagal konek ONVIF: ${err.message}` });
     }
-    this.getStreamUri({ protocol: 'RTSP' }, (err2, stream) => {
-      if (responded) return;
-      if (err2) {
+    // getProfiles/getVideoSources run automatically as part of connect()
+    // above (populating this.profiles), but GetDeviceInformation does not —
+    // it has to be called explicitly to get serialNumber/firmwareVersion.
+    // Some cheaper cameras don't support it at all; ignore that failure and
+    // keep going with whatever the RTSP-URI probe below still finds.
+    this.getDeviceInformation(() => {
+      this.getStreamUri({ protocol: 'RTSP' }, (err2, stream) => {
+        if (responded) return;
+        if (err2) {
+          responded = true;
+          return res.status(502).json({ error: `Gagal ambil stream URI: ${err2.message}` });
+        }
+
+        const ptzSupported = !!this.services?.ptz;
+        // Fall back to whatever was already stored when a field isn't
+        // reported (some cameras omit fields from GetDeviceInformation).
+        const serialNumber = this.deviceInformation?.serialNumber || cam.serial_number || null;
+        const firmwareVersion = this.deviceInformation?.firmwareVersion || cam.firmware_version || null;
+        const channelCount = this.profiles?.length || cam.channel_count || 1;
+        db.prepare('UPDATE cameras SET rtsp_url = ?, ptz_supported = ?, serial_number = ?, firmware_version = ?, channel_count = ? WHERE id = ?')
+          .run(encrypt(stream.uri), ptzSupported ? 1 : 0, serialNumber, firmwareVersion, channelCount, id);
+
+        const updatedCam = getCameraById(id);
+        motion.syncCamera(updatedCam);
+        logEvent(id, 'onvif_probe_ok', 'Berhasil mengambil stream URI via ONVIF', req.user);
         responded = true;
-        return res.status(502).json({ error: `Gagal ambil stream URI: ${err2.message}` });
-      }
-
-      const ptzSupported = !!this.services?.ptz;
-      db.prepare('UPDATE cameras SET rtsp_url = ?, ptz_supported = ? WHERE id = ?')
-        .run(encrypt(stream.uri), ptzSupported ? 1 : 0, id);
-
-      const updatedCam = getCameraById(id);
-      motion.syncCamera(updatedCam);
-      logEvent(id, 'onvif_probe_ok', 'Berhasil mengambil stream URI via ONVIF', req.user);
-      responded = true;
-      res.json({
-        rtsp_url: stream.uri,
-        ptz_supported: ptzSupported,
-        manufacturer: this.deviceInformation?.manufacturer,
-        model: this.deviceInformation?.model
+        res.json({
+          rtsp_url: stream.uri,
+          ptz_supported: ptzSupported,
+          manufacturer: this.deviceInformation?.manufacturer,
+          model: this.deviceInformation?.model,
+          serial_number: serialNumber,
+          firmware_version: firmwareVersion,
+          channel_count: channelCount
+        });
       });
     });
   });

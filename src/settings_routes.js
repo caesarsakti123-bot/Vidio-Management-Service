@@ -26,7 +26,11 @@ const ALLOWED_LOGO_TYPES = {
 const upload = multer({
   storage: multer.diskStorage({
     destination: UPLOADS_DIR,
-    filename: (req, file, cb) => cb(null, `logo${path.extname(file.originalname).toLowerCase()}`),
+    // Use the extension for the verified Content-Type, not the client-
+    // supplied original filename — a file with no/wrong extension in its
+    // name would otherwise be saved without one and served without a MIME
+    // type express.static can map.
+    filename: (req, file, cb) => cb(null, `logo${ALLOWED_LOGO_TYPES[file.mimetype]?.ext || ''}`),
   }),
   limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
   fileFilter: (req, file, cb) => {

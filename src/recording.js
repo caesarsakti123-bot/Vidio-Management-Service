@@ -197,11 +197,22 @@ function stopRecording(cameraId) {
     entry.reconnectTimer = null;
   }
   if (entry.stableTimer) clearTimeout(entry.stableTimer);
-  if (entry.process) {
-    entry.process.kill('SIGTERM');
-  } else {
+  const proc = entry.process;
+  // A process can still be sitting on `entry` after it already exited once
+  // (mid reconnect-backoff — e.g. a camera whose RTSP connection times out
+  // repeatedly — with the next spawn just cancelled above via
+  // reconnectTimer). kill() on an already-dead process is a silent no-op,
+  // and since its 'exit' event already fired once, no new one will ever
+  // come to run the cleanup that normally deletes this entry — without this
+  // check, the "Stop rekam" button would leave the camera stuck reporting
+  // recording_active forever, with nothing actually running and no way to
+  // stop it short of a server restart. See the identical guard in
+  // stopRecordingAndWait() below.
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
     activeRecorders.delete(cameraId); // still probing codec, or mid-backoff wait with no live process
+    return true;
   }
+  proc.kill('SIGTERM');
   return true;
 }
 
@@ -240,7 +251,8 @@ function isRecording(cameraId) {
 
 // Scan recordings directories, register new files into DB, and delete files older than retention.
 function reconcileAndCleanup() {
-  const retentionDays = Number(settings.getSetting('retention_days')) || 14;
+  const rawRetentionDays = Number(settings.getSetting('retention_days'));
+  const retentionDays = Number.isFinite(rawRetentionDays) && rawRetentionDays >= 1 ? rawRetentionDays : 14;
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
 
   const cameras = db.prepare('SELECT id FROM cameras').all();

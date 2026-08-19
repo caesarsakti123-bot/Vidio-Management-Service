@@ -32,7 +32,10 @@ function withJitter(delayMs) {
 }
 
 function spawnDetectorProc(camera, entry) {
-  const sensitivity = Number(camera.motion_sensitivity) || 0.04;
+  // camera.motion_sensitivity of exactly 0 (max sensitivity) is a valid,
+  // intentional value and must not be replaced by the default.
+  const rawSensitivity = Number(camera.motion_sensitivity);
+  const sensitivity = Number.isFinite(rawSensitivity) ? rawSensitivity : 0.04;
   const args = [
     '-rtsp_transport', 'tcp',
     '-i', camera.rtsp_url,
@@ -152,7 +155,7 @@ function isMotionActive(cameraId) {
 
 function syncCamera(camera) {
   if (!camera) return;
-  if (camera.motion_detection_enabled && camera.rtsp_url) {
+  if (camera.motion_detection_enabled && camera.rtsp_url && !camera.is_relay) {
     startDetector(camera);
   } else {
     stopDetector(camera.id);
@@ -160,7 +163,7 @@ function syncCamera(camera) {
 }
 
 function startAllEnabled() {
-  const cameras = db.prepare('SELECT * FROM cameras WHERE motion_detection_enabled = 1 AND rtsp_url IS NOT NULL').all();
+  const cameras = db.prepare('SELECT * FROM cameras WHERE motion_detection_enabled = 1 AND rtsp_url IS NOT NULL AND is_relay = 0').all();
   cameras.map(decryptCamera).forEach(startDetector);
 }
 

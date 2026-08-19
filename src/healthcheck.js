@@ -84,4 +84,11 @@ function stop() {
   if (intervalHandle) clearInterval(intervalHandle);
 }
 
-module.exports = { startHealthCheckScheduler, reschedule, stop, runHealthCheck };
+// No entry yet (never checked, e.g. a camera added since the last pass)
+// reads as online — same "innocent until proven offline" default the
+// consecutiveFailures/isOffline state starts at above.
+function isOnline(cameraId) {
+  return !state.get(cameraId)?.isOffline;
+}
+
+module.exports = { startHealthCheckScheduler, reschedule, stop, runHealthCheck, isOnline };

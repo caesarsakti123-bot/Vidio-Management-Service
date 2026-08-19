@@ -3,6 +3,7 @@ const state = {
   user: JSON.parse(localStorage.getItem('vms_user') || '{}'),
   cameras: [],
   players: new Map(), // cameraId -> Hls instance
+  pagedOutVideos: new Map(), // cameraId -> detached <video> node kept alive (network paused) while its tile is off the current layout page
   pollTimer: null,
   layout: localStorage.getItem('vms_layout') || 'auto',
   layoutPage: 0,
@@ -15,6 +16,9 @@ const state = {
   statusFilter: null, // null | 'active' | 'inactive'
   capabilityFilter: null, // null | 'ptz' | 'motion' | 'recording' | 'relay'
   cameraSearch: '',
+  deviceSearch: '',
+  devicePage: 0,
+  devicePageSize: 50,
   healthTrendDays: 7,
   bulkSelectMode: false,
   bulkSelectedIds: new Set(),
@@ -329,6 +333,8 @@ function renderNavForRole() {
   document.querySelectorAll('.nav-item[data-view="users"], .nav-item[data-view="activity"]').forEach((item) => {
     item.style.display = state.user.role === 'admin' ? 'block' : 'none';
   });
+  const devicesNav = $('.nav-item[data-view="devices"]');
+  if (devicesNav) devicesNav.style.display = state.user.role === 'viewer' ? 'none' : 'block';
   // "Pengaturan Sistem" moved from the main nav into the footer's
   // "Pengaturan" menu (see index.html) — it isn't a .nav-item anymore, so
   // it needs its own visibility toggle here instead of riding the selector
@@ -548,7 +554,7 @@ if (state.token) enterApp();
 
 // ---- Navigation ----
 
-const ALL_VIEWS = ['dashboard', 'live', 'map', 'recordings', 'events', 'health', 'users', 'activity', 'settings', 'sop'];
+const ALL_VIEWS = ['dashboard', 'live', 'devices', 'map', 'recordings', 'events', 'health', 'users', 'activity', 'settings', 'sop'];
 
 function showView(viewName) {
   ALL_VIEWS.forEach((v) => {
@@ -568,6 +574,7 @@ document.querySelectorAll('.nav-item').forEach((item) => {
     if (item.dataset.view === 'recordings') loadRecordings();
     if (item.dataset.view === 'events') loadEvents();
     if (item.dataset.view === 'health') loadHealthTrends(state.healthTrendDays || 7);
+    if (item.dataset.view === 'devices') { closeDeviceDetail(); renderDeviceTable(); }
     if (item.dataset.view === 'users') loadUsers();
     if (item.dataset.view === 'activity') loadUserActivity(state.activityDays || 7);
     if (item.dataset.view === 'map') showMapView();
@@ -691,6 +698,7 @@ async function loadCameras() {
       const cam = state.cameras.find((c) => c.id === focusCameraId);
       if (cam) renderFocusModal(cam);
     }
+    if (!$('#view-devices')?.classList.contains('hidden')) renderDeviceTable();
   } catch (e) {
     console.error(e);
   }
@@ -1087,10 +1095,18 @@ function renderGrid() {
   // and the re-insertion both happen synchronously within this same
   // function, with no `await`/timeout between them for the browser to
   // treat the node as gone.
+  // A player can also be alive but currently off-DOM — paginated off the
+  // layout page on a previous renderGrid() call (see the pagedOutVideos
+  // handling below) — so it needs to be found there too, not just in the
+  // live document.
   const liveVideoNodes = new Map();
+  const idsResumingFromPagedOut = new Set();
   for (const id of playingIds) {
-    const el = document.getElementById(`video-${id}`);
+    const pagedOutEl = state.pagedOutVideos.get(id);
+    const el = document.getElementById(`video-${id}`) || pagedOutEl;
     if (el) liveVideoNodes.set(id, el);
+    if (pagedOutEl) idsResumingFromPagedOut.add(id);
+    state.pagedOutVideos.delete(id); // re-added below if still off-page after this render
   }
 
   grid.innerHTML = '';
@@ -1107,6 +1123,7 @@ function renderGrid() {
       if (hls) hls.destroy();
     }
     state.players.clear();
+    state.pagedOutVideos.clear();
     updateLayoutPager(0, 0);
     return;
   }
@@ -1122,6 +1139,7 @@ function renderGrid() {
       if (hls) hls.destroy();
     }
     state.players.clear();
+    state.pagedOutVideos.clear();
     updateLayoutPager(0, 0);
     return;
   }
@@ -1184,25 +1202,55 @@ function renderGrid() {
   // never started from this browser tab (e.g. still running from before a
   // page reload, or started by another operator), so their tile shows live
   // video instead of sitting blank even though the status badge says active.
+  // Focus view deliberately pauses every grid player to hand its own stream
+  // the full 6-connections-per-host budget (see pauseGridPlayersForFocus) —
+  // the 15s poll calls renderGrid() unconditionally regardless of whether
+  // focus view is open, so without this check it would undo that pause on
+  // the very next poll, starving the focus stream again a few seconds in.
+  // closeFocusView() calls renderGrid() itself once the modal is hidden, so
+  // background tiles still resume promptly, just not while focus view is up.
+  const focusViewOpen = !$('#focus-modal')?.classList.contains('hidden');
+
   const activeIds = new Set(playingIds);
   for (const cam of camerasToShow) {
     if (cam.stream.active) activeIds.add(cam.id);
   }
   for (const id of activeIds) {
     const cam = state.cameras.find((c) => c.id === id);
-    const placeholderVideo = document.getElementById(`video-${id}`);
-    if (!cam || !cam.stream.active || !placeholderVideo) {
+    if (!cam || !cam.stream.active) {
       const hls = state.players.get(id);
       if (hls) hls.destroy();
       state.players.delete(id);
+      state.pagedOutVideos.delete(id);
       continue;
     }
 
+    const placeholderVideo = document.getElementById(`video-${id}`);
     const liveVideo = liveVideoNodes.get(id);
+
+    if (!placeholderVideo) {
+      // Camera is still live but its tile isn't on the current layout page
+      // (paginated away) — keep the player alive instead of destroying it,
+      // so flipping back to this page resumes instantly instead of
+      // reconnecting from scratch, but stop its network activity while
+      // unseen so it doesn't keep competing for the 6-connections-per-host
+      // budget or wasting bandwidth on a stream nobody's looking at.
+      if (liveVideo && state.players.has(id)) {
+        state.players.get(id).stopLoad();
+        state.pagedOutVideos.set(id, liveVideo);
+      }
+      continue;
+    }
+
     if (liveVideo && state.players.has(id)) {
       placeholderVideo.replaceWith(liveVideo);
       document.getElementById(`placeholder-${id}`)?.classList.add('hidden');
-    } else {
+      // Only resume loading if this tile was actually paused for pagination —
+      // calling startLoad() on a player that was never stopped (e.g. an
+      // ordinary same-page 15s poll) would restart it from the live edge
+      // and cause a visible hiccup for playback that was never interrupted.
+      if (idsResumingFromPagedOut.has(id)) state.players.get(id).startLoad();
+    } else if (!focusViewOpen) {
       startPlayer(id, `/streams/${id}/index.m3u8`);
     }
   }
@@ -1333,32 +1381,47 @@ function createHlsErrorHandler(hls, onGiveUp) {
   };
 }
 
-function startPlayer(id, playlistUrl) {
-  const video = $(`#video-${id}`);
-  if (!video) return;
-  stopPlayer(id); // avoid orphaned hls.js instances piling up across re-renders
-  $(`#placeholder-${id}`)?.classList.add('hidden');
+// Shared by grid tiles (startPlayer) and the focus view modal — a single
+// code path for attaching hls.js (or native HLS on Safari/iOS) to a
+// <video>, so the two can't silently drift apart in how they set up or
+// recover playback. Owns destroying itself on a fatal error before
+// notifying the caller, so callers never need to re-destroy.
+function attachHlsPlayer(video, playlistUrl, onFatalError) {
   if (Hls.isSupported()) {
     const hls = new Hls();
     hls.loadSource(playlistUrl);
     hls.attachMedia(video);
     hls.on(Hls.Events.ERROR, createHlsErrorHandler(hls, () => {
-      stopPlayer(id);
-      const placeholder = $(`#placeholder-${id}`);
-      if (!placeholder) return;
-      placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
-      placeholder.classList.remove('hidden');
-      setTimeout(() => {
-        const cam = state.cameras.find((c) => c.id === id);
-        if (cam?.stream?.active && $(`#video-${id}`)) startPlayer(id, playlistUrl);
-      }, 3000);
+      hls.destroy();
+      onFatalError();
     }));
     video.play().catch(() => {});
-    state.players.set(id, hls);
-  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    return hls;
+  }
+  if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = playlistUrl;
     video.play().catch(() => {});
   }
+  return null;
+}
+
+function startPlayer(id, playlistUrl) {
+  const video = $(`#video-${id}`);
+  if (!video) return;
+  stopPlayer(id); // avoid orphaned hls.js instances piling up across re-renders
+  $(`#placeholder-${id}`)?.classList.add('hidden');
+  const hls = attachHlsPlayer(video, playlistUrl, () => {
+    state.players.delete(id);
+    const placeholder = $(`#placeholder-${id}`);
+    if (!placeholder) return;
+    placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
+    placeholder.classList.remove('hidden');
+    setTimeout(() => {
+      const cam = state.cameras.find((c) => c.id === id);
+      if (cam?.stream?.active && $(`#video-${id}`)) startPlayer(id, playlistUrl);
+    }, 3000);
+  });
+  if (hls) state.players.set(id, hls);
 }
 
 function stopPlayer(id) {
@@ -1367,16 +1430,66 @@ function stopPlayer(id) {
     hls.destroy();
     state.players.delete(id);
   }
+  state.pagedOutVideos.delete(id);
 }
 
 // ---- Focus view (click a camera tile to enlarge it) ----
 
 let focusHls = null;
 let focusCameraId = null;
+let gridResumeTimer = null;
+
+// Browsers cap concurrent connections per host at 6 (HTTP/1.1) — with dozens
+// of grid tiles all polling their own HLS playlist/segments in the
+// background, a freshly-opened focus view's manifest request can end up
+// queued behind them indefinitely and never actually load, even though the
+// exact same stream plays fine once a slot frees up. Pausing every grid
+// player while focus view is open hands the focus stream the whole
+// connection budget; renderGrid() naturally restarts whichever ones are
+// still cam.stream.active once it closes (same recovery path the 15s poll
+// already uses).
+function pauseGridPlayersForFocus() {
+  for (const id of [...state.players.keys()]) stopPlayer(id);
+}
+
+// hls.js's destroy()/detachMedia() on a <video> tears down its MediaSource
+// asynchronously in the browser's own media pipeline, not purely
+// synchronously in JS — re-attaching a brand new Hls() to the *same* video
+// element right away (close, then immediately reopen) can race that teardown
+// and silently never reach a playable state, with no error surfaced. A
+// cloned, never-attached element sidesteps the race entirely instead of
+// needing to guess a safe delay.
+function resetFocusVideoElement() {
+  const oldVideo = $('#focus-video');
+  const freshVideo = oldVideo.cloneNode(false);
+  oldVideo.replaceWith(freshVideo);
+  return freshVideo;
+}
 
 function openFocusView(cameraId) {
   const cam = state.cameras.find((c) => c.id === cameraId);
   if (!cam) return;
+  // Force a genuinely fresh player on every explicit open — renderFocusModal's
+  // own guard (`!focusHls && !video.currentSrc`) only prevents *redundant*
+  // setup on the 15s poll-triggered re-renders of an already-playing camera;
+  // it can't tell "still the same camera, don't interrupt it" apart from
+  // "leftover player from a previous camera/failed attempt", so a stuck or
+  // stale player from before would otherwise block any new attempt forever.
+  if (focusHls) {
+    focusHls.destroy();
+    focusHls = null;
+  }
+  resetFocusVideoElement();
+  // Cancel a pending resume from a just-closed previous focus view — without
+  // this, closing camera A then immediately opening camera B would let A's
+  // delayed renderGrid() fire *after* B's pause, restarting the exact
+  // connection churn (start → immediately abort → stale-manifest 404s) this
+  // whole scheme exists to avoid.
+  if (gridResumeTimer) {
+    clearTimeout(gridResumeTimer);
+    gridResumeTimer = null;
+  }
+  pauseGridPlayersForFocus();
   focusCameraId = cameraId;
   $('#focus-modal').classList.remove('hidden');
   renderFocusModal(cam);
@@ -1387,12 +1500,18 @@ function closeFocusView() {
     focusHls.destroy();
     focusHls = null;
   }
-  const video = $('#focus-video');
-  video.pause();
-  video.removeAttribute('src');
-  video.load();
+  resetFocusVideoElement();
   $('#focus-modal').classList.add('hidden');
   focusCameraId = null;
+  // Debounced, not immediate — closing and immediately reopening a (maybe
+  // different) camera is a common flow, and resuming every background tile
+  // right away just to tear them all down again a moment later is exactly
+  // the start/abort churn that leaves segments 404ing. If focus view is
+  // still closed 2s later, it's a real "back to browsing the grid" moment.
+  gridResumeTimer = setTimeout(() => {
+    gridResumeTimer = null;
+    if ($('#focus-modal')?.classList.contains('hidden')) renderGrid();
+  }, 2000);
 }
 
 function renderFocusModal(cam) {
@@ -1416,27 +1535,17 @@ function renderFocusModal(cam) {
   if (cam.stream.active) {
     placeholder.classList.add('hidden');
     if (!focusHls && !video.currentSrc) {
-      if (Hls.isSupported()) {
-        focusHls = new Hls();
-        focusHls.loadSource(`/streams/${cam.id}/index.m3u8`);
-        focusHls.attachMedia(video);
-        focusHls.on(Hls.Events.ERROR, createHlsErrorHandler(focusHls, () => {
-          focusHls?.destroy();
-          focusHls = null;
+      focusHls = attachHlsPlayer(video, `/streams/${cam.id}/index.m3u8`, () => {
+        focusHls = null;
+        if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
+        placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
+        placeholder.classList.remove('hidden');
+        setTimeout(() => {
           if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
-          placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
-          placeholder.classList.remove('hidden');
-          setTimeout(() => {
-            if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
-            const latestCam = state.cameras.find((c) => c.id === cam.id);
-            if (latestCam) renderFocusModal(latestCam);
-          }, 3000);
-        }));
-        video.play().catch(() => {});
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = `/streams/${cam.id}/index.m3u8`;
-        video.play().catch(() => {});
-      }
+          const latestCam = state.cameras.find((c) => c.id === cam.id);
+          if (latestCam) renderFocusModal(latestCam);
+        }, 3000);
+      });
     }
   } else {
     if (focusHls) {
@@ -2238,6 +2347,240 @@ $('#camera-search-clear')?.addEventListener('click', () => {
   renderGrid();
 });
 
+// ---- Device table (Perangkat) — HikCentral-style camera inventory list ----
+
+const PASSWORD_STRENGTH_LABEL = { strong: 'Kuat', medium: 'Sedang', weak: 'Lemah' };
+
+function getFilteredDevices() {
+  const q = state.deviceSearch.trim().toLowerCase();
+  if (!q) return state.cameras;
+  return state.cameras.filter((c) => {
+    const haystack = [c.name, c.ip, c.serial_number, c.brand].filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(q);
+  });
+}
+
+function renderDeviceTable() {
+  const tbody = $('#devices-table');
+  if (!tbody) return;
+
+  const filtered = getFilteredDevices();
+  const pageSize = state.devicePageSize;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  if (state.devicePage > totalPages - 1) state.devicePage = totalPages - 1;
+  if (state.devicePage < 0) state.devicePage = 0;
+  const pageItems = filtered.slice(state.devicePage * pageSize, state.devicePage * pageSize + pageSize);
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text-dim)">Tidak ada perangkat ditemukan.</td></tr>';
+  } else {
+    tbody.innerHTML = pageItems.map((cam) => {
+      const canEdit = state.user.role !== 'viewer';
+      const canDelete = state.user.role === 'admin';
+      const online = cam.network_status === 'online';
+      return `
+        <tr>
+          <td><a href="#" class="device-name-link" data-device-action="detail" data-id="${cam.id}">${escapeHtml(cam.name)}</a></td>
+          <td>${escapeHtml(cam.ip)}</td>
+          <td>${escapeHtml(cam.serial_number || '-')}</td>
+          <td>${escapeHtml(cam.firmware_version || '-')}</td>
+          <td>${cam.channel_count || 1}</td>
+          <td><span class="net-badge ${online ? 'online' : 'offline'}"><span class="net-badge-dot"></span>${online ? 'Online' : 'Offline'}</span></td>
+          <td><span class="pw-strength-badge ${cam.password_strength || 'weak'}">${PASSWORD_STRENGTH_LABEL[cam.password_strength] || 'Lemah'}</span></td>
+          <td class="row-actions">
+            ${canEdit ? `<button data-device-action="edit" data-id="${cam.id}">Edit</button>` : ''}
+            ${canEdit && !cam.is_relay ? `<button data-device-action="probe" data-id="${cam.id}">Probe ONVIF</button>` : ''}
+            ${canDelete ? `<button data-device-action="delete" data-id="${cam.id}" class="danger">Hapus</button>` : ''}
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  tbody.querySelectorAll('[data-device-action]').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      handleDeviceAction(el.dataset.deviceAction, Number(el.dataset.id));
+    });
+  });
+
+  $('#devices-total-label').textContent = `Total: ${filtered.length}`;
+  $('#devices-page-input').value = state.devicePage + 1;
+  $('#devices-page-total').textContent = `/ ${totalPages}`;
+}
+
+async function handleDeviceAction(action, id) {
+  const cam = state.cameras.find((c) => c.id === id);
+  if (!cam) return;
+  if (action === 'detail') {
+    openDeviceDetail(cam);
+    return;
+  }
+  if (action === 'edit') {
+    openCameraModal(cam);
+    return;
+  }
+  try {
+    if (action === 'probe') {
+      await api(`/cameras/${id}/onvif/probe`, { method: 'POST' });
+      showToast(`Probe ONVIF "${cam.name}" berhasil.`);
+      await loadCameras();
+    } else if (action === 'delete') {
+      if (!(await showConfirm(`Hapus kamera "${cam.name}"?`, { title: 'Hapus Kamera' }))) return;
+      await api(`/cameras/${id}`, { method: 'DELETE' });
+      await loadCameras();
+    }
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+$('#device-add-btn')?.addEventListener('click', () => openCameraModal(null));
+
+// Probe every non-relay device sequentially (each ONVIF round-trip already
+// takes seconds on its own — no extra artificial delay needed between them,
+// unlike stream-start-all's ffmpeg spawns which return almost instantly and
+// need pacing to avoid a burst).
+$('#device-probe-all-btn')?.addEventListener('click', async () => {
+  const btn = $('#device-probe-all-btn');
+  const targets = state.cameras.filter((c) => !c.is_relay);
+  if (targets.length === 0) return;
+  btn.disabled = true;
+  const originalHtml = btn.innerHTML;
+  let ok = 0;
+  let failed = 0;
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      btn.textContent = `Probing ${i + 1}/${targets.length}...`;
+      try {
+        await api(`/cameras/${targets[i].id}/onvif/probe`, { method: 'POST' });
+        ok += 1;
+      } catch (e) {
+        failed += 1;
+        console.error(`Gagal probe "${targets[i].name}":`, e.message);
+      }
+    }
+    await loadCameras();
+    showToast(`Probe selesai: ${ok} berhasil, ${failed} gagal.`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+});
+
+// ---- Device detail page (Informasi Dasar — basic connection info only;
+// motion/location/relay settings still live in the full openCameraModal,
+// reached via the "Edit" row action) ----
+
+let deviceDetailId = null;
+
+// Mirrors src/cameras.js's passwordStrength() exactly — duplicated
+// intentionally so the strength meter updates live as the admin types,
+// without a round-trip per keystroke.
+function computePasswordStrength(password) {
+  if (!password) return null;
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((re) => re.test(password)).length;
+  if (password.length >= 10 && classes >= 3) return 'strong';
+  if (password.length >= 8 && classes >= 2) return 'medium';
+  return 'weak';
+}
+
+function updatePasswordMeter() {
+  const strength = computePasswordStrength($('#dd-password').value);
+  const bar = $('#dd-password-bar');
+  const label = $('#dd-password-label');
+  bar.className = `password-strength-bar${strength ? ` ${strength}` : ''}`;
+  label.className = `password-strength-label${strength ? ` ${strength}` : ''}`;
+  label.textContent = strength ? PASSWORD_STRENGTH_LABEL[strength] : '';
+}
+
+function openDeviceDetail(cam) {
+  deviceDetailId = cam.id;
+  $('#device-detail-title').textContent = cam.name;
+  $('#device-detail-open-link').href = `http://${cam.ip}`;
+  $('#dd-ip').value = cam.ip || '';
+  $('#dd-rtsp-port').value = cam.rtsp_port || 554;
+  $('#dd-onvif-port').value = cam.onvif_port || 80;
+  $('#dd-name').value = cam.name || '';
+  $('#dd-username').value = cam.username || '';
+  $('#dd-password').value = '';
+  updatePasswordMeter();
+  $('#dd-form-msg').textContent = '';
+  $('#dd-form-msg').className = 'form-msg';
+  $('#devices-list-view').classList.add('hidden');
+  $('#devices-detail-view').classList.remove('hidden');
+}
+
+function closeDeviceDetail() {
+  deviceDetailId = null;
+  $('#devices-detail-view').classList.add('hidden');
+  $('#devices-list-view').classList.remove('hidden');
+}
+
+$('#dd-password')?.addEventListener('input', updatePasswordMeter);
+$('#device-detail-back-btn')?.addEventListener('click', closeDeviceDetail);
+$('#dd-cancel-btn')?.addEventListener('click', closeDeviceDetail);
+
+$('#dd-save-btn')?.addEventListener('click', async () => {
+  const msg = $('#dd-form-msg');
+  msg.className = 'form-msg';
+  msg.textContent = '';
+  try {
+    const name = $('#dd-name').value.trim();
+    const ip = $('#dd-ip').value.trim();
+    if (!name || !ip) throw new Error('Nama dan alamat IP wajib diisi');
+    const body = {
+      name,
+      ip,
+      rtsp_port: Number($('#dd-rtsp-port').value) || 554,
+      onvif_port: Number($('#dd-onvif-port').value) || 80,
+      username: $('#dd-username').value.trim(),
+    };
+    const passwordInput = $('#dd-password').value;
+    if (passwordInput) body.password = passwordInput;
+
+    await api(`/cameras/${deviceDetailId}`, { method: 'PUT', body });
+    msg.textContent = 'Tersimpan';
+    msg.classList.add('ok');
+    await loadCameras();
+    setTimeout(closeDeviceDetail, 700);
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add('error');
+  }
+});
+
+$('#device-search-input')?.addEventListener('input', (e) => {
+  state.deviceSearch = e.target.value;
+  state.devicePage = 0;
+  $('#device-search-clear')?.classList.toggle('hidden', !state.deviceSearch);
+  renderDeviceTable();
+});
+
+$('#device-search-clear')?.addEventListener('click', () => {
+  state.deviceSearch = '';
+  $('#device-search-input').value = '';
+  $('#device-search-clear').classList.add('hidden');
+  state.devicePage = 0;
+  renderDeviceTable();
+});
+
+$('#devices-page-size')?.addEventListener('change', (e) => {
+  state.devicePageSize = Number(e.target.value) || 50;
+  state.devicePage = 0;
+  renderDeviceTable();
+});
+
+function goToDevicePage() {
+  const requested = Number($('#devices-page-input').value) || 1;
+  state.devicePage = Math.max(0, requested - 1);
+  renderDeviceTable();
+}
+$('#devices-page-go-btn')?.addEventListener('click', goToDevicePage);
+$('#devices-page-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') goToDevicePage();
+});
+
 // Shared by every sub-tab strip in the app (Peta Lokasi, Rekaman,
 // Pengaturan): swaps the `.active` class among a strip's buttons and
 // shows/hides one panel per tab, deriving each panel's id from the
@@ -2574,10 +2917,10 @@ const prefersReducedMotion = () => window.matchMedia?.('(prefers-reduced-motion:
       // dramatic tilt; stat tiles are smaller/text-heavy, so a subtler
       // angle keeps their numbers legible instead of swimming around.
       const isTile = el.classList.contains('tile');
-      const max = isTile ? 11 : 6;
+      const max = isTile ? 7 : 4;
       const rotateY = (px - 0.5) * max * 2;
       const rotateX = (0.5 - py) * max * 2;
-      const scale = isTile ? 1.035 : 1.02;
+      const scale = isTile ? 1.02 : 1.012;
       el.style.transform = `perspective(900px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) scale(${scale}) translateY(-4px)`;
     });
   }, { passive: true });
