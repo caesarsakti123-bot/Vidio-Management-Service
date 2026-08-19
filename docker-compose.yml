@@ -18,6 +18,7 @@ services:
       - CAMERA_ENCRYPTION_KEY=${CAMERA_ENCRYPTION_KEY:?Wajib diisi di .env — generate dengan: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"}
       - RETENTION_DAYS=${RETENTION_DAYS:-14}
       - FFMPEG_PATH=ffmpeg
+      - FFPROBE_PATH=ffprobe
       - STREAM_MAX_WIDTH=${STREAM_MAX_WIDTH:-960}
       - STREAM_FPS=${STREAM_FPS:-15}
       # No GPU device passthrough by default, so hardware encoding isn't
