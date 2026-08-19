@@ -1508,7 +1508,12 @@ function startPlayer(id, playlistUrl) {
     placeholder.classList.remove('hidden');
     setTimeout(() => {
       const cam = state.cameras.find((c) => c.id === id);
-      if (cam?.stream?.active && $(`#video-${id}`)) startPlayer(id, playlistUrl);
+      // Grid tiles run the 'sub' profile — gating retry on cam.stream.active
+      // (the main-profile flag) meant a sub stream that was still alive and
+      // simply slow to write its first HLS segment (e.g. queued behind
+      // SOFTWARE_CONCURRENCY_LIMIT) never got retried after hls.js gave up,
+      // leaving the tile stuck black/"mencoba lagi..." forever.
+      if (cam?.stream_sub?.active && $(`#video-${id}`)) startPlayer(id, playlistUrl);
     }, 3000);
   });
   if (hls) state.players.set(id, hls);
