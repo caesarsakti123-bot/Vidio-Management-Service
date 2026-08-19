@@ -7,6 +7,7 @@ const settings = require('./settings');
 
 const STREAMS_DIR = path.join(__dirname, '..', 'public', 'streams');
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 
 // The RTSP client-side socket timeout flag has flip-flopped across ffmpeg
 // releases and hardcoding either name breaks the *other* line:
@@ -141,11 +142,21 @@ function buildArgs(camera, dir, playlistPath, encoder) {
   // -tune zerolatency (x264) / -bf 0 (qsv) drop B-frames — besides cutting
   // encode latency, B-frames reorder output relative to decode order, which
   // adds one more way segment boundaries can end up misaligned with GOPs.
-  const encoderArgs = encoder === 'qsv'
-    ? ['-vf', `${scale},format=nv12`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '25', '-g', String(gop), '-bf', '0']
-    : ['-vf', `${scale},format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '23', '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0'];
+  let encoderArgs;
+  if (encoder === 'copy') {
+    // No filtering/scaling is possible without decoding, so resolution, fps
+    // and keyframe interval are all whatever the camera itself is already
+    // producing — the HLS muxer just cuts each segment on the nearest
+    // source keyframe instead of a forced ~2s boundary. stream_max_width/
+    // stream_fps settings don't apply in this mode.
+    encoderArgs = ['-c:v', 'copy'];
+  } else if (encoder === 'qsv') {
+    encoderArgs = ['-vf', `${scale},format=nv12`, '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '25', '-g', String(gop), '-bf', '0'];
+  } else {
+    encoderArgs = ['-vf', `${scale},format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '23', '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0'];
+  }
 
-  return [
+  const args = [
     // Tolerate the packet loss/corruption a real WAN-facing camera link
     // produces instead of the whole pipeline stalling or dying on it:
     // genpts patches up missing/broken timestamps, discardcorrupt drops a
@@ -167,7 +178,9 @@ function buildArgs(camera, dir, playlistPath, encoder) {
     RTSP_TIMEOUT_FLAG, '10000000', // microseconds
     '-i', camera.rtsp_url,
     ...encoderArgs,
-    '-r', String(fps),
+    // -r forces a framerate conversion, which (like -vf) requires decoding —
+    // invalid alongside -c:v copy, so the camera's native fps is kept as-is.
+    ...(encoder === 'copy' ? [] : ['-r', String(fps)]),
     '-an',
     '-f', 'hls',
     '-hls_time', String(HLS_SEGMENT_SECONDS),
@@ -176,6 +189,7 @@ function buildArgs(camera, dir, playlistPath, encoder) {
     '-hls_segment_filename', path.join(dir, 'seg_%03d.ts'),
     playlistPath
   ];
+  return args;
 }
 
 // Retrying forever is the correct behavior for a live-monitoring wall left
@@ -202,7 +216,66 @@ function withJitter(delayMs) {
   return Math.round(delayMs * (0.8 + Math.random() * 0.4));
 }
 
-function preferredEncoder() {
+// Re-encoding every live view (resize + libx264/QSV) burns CPU/GPU even when
+// the camera is already sending H.264 that a browser could play as-is — on a
+// host with only a handful of encode slots (see QSV/SOFTWARE_CONCURRENCY_LIMIT
+// above), that's the difference between 3 cameras live and all of them live.
+// When the source is confirmed H.264, skip encoding entirely and just remux
+// into HLS (-c:v copy): near-zero CPU cost, so it doesn't compete for either
+// concurrency slot at all (see spawnEncoder). Cameras already sending H.265
+// or anything else still go through the normal QSV/x264 path.
+const videoCodecByCamera = new Map(); // cameraId -> { rtspUrl, codec: 'h264' | 'other' }
+const codecProbeInFlight = new Set();
+
+function probeVideoCodec(camera) {
+  return new Promise((resolve) => {
+    const args = [
+      '-v', 'error',
+      '-rtsp_transport', 'tcp',
+      RTSP_TIMEOUT_FLAG, '5000000',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_name',
+      '-of', 'csv=p=0',
+      camera.rtsp_url,
+    ];
+    let out = '';
+    let proc;
+    try {
+      proc = spawn(FFPROBE, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    } catch (_err) {
+      resolve('');
+      return;
+    }
+    proc.stdout.on('data', (chunk) => { out += chunk; });
+    proc.on('close', () => resolve(out.trim().toLowerCase()));
+    proc.on('error', () => resolve(''));
+  });
+}
+
+// Fire-and-forget: caches the result for the *next* start/reconnect attempt
+// rather than blocking the current one on an extra RTSP round-trip. A single
+// in-flight probe per camera, since reconnect attempts can pile up quickly
+// (2s base backoff) and each one would otherwise kick off its own ffprobe.
+function ensureCodecProbed(camera) {
+  if (codecProbeInFlight.has(camera.id)) return;
+  codecProbeInFlight.add(camera.id);
+  probeVideoCodec(camera)
+    .then((codecName) => {
+      videoCodecByCamera.set(camera.id, {
+        rtspUrl: camera.rtsp_url,
+        codec: codecName === 'h264' ? 'h264' : 'other',
+      });
+    })
+    .finally(() => codecProbeInFlight.delete(camera.id));
+}
+
+function preferredEncoder(camera) {
+  const cached = camera && videoCodecByCamera.get(camera.id);
+  if (cached && cached.rtspUrl === camera.rtsp_url) {
+    if (cached.codec === 'h264') return 'copy';
+  } else if (camera) {
+    ensureCodecProbed(camera);
+  }
   if (settings.getSetting('hwaccel_mode') === 'software' || qsvKnownUnavailable) return 'x264';
   if (activeQsvCount >= QSV_CONCURRENCY_LIMIT) return 'x264';
   return 'qsv';
@@ -250,10 +323,13 @@ function spawnEncoder(camera, entry, encoder) {
   // (crash, clean exit, fallback, stop) so the count never leaks or double-frees.
   let usingQsvSlot = false;
   let usingSoftwareSlot = false;
+  // 'copy' claims neither slot — a remux-only process costs negligible CPU,
+  // so it shouldn't compete with (or count against) the QSV/software caps
+  // that exist specifically to protect the box from encode overload.
   if (encoder === 'qsv') {
     activeQsvCount += 1;
     usingQsvSlot = true;
-  } else {
+  } else if (encoder === 'x264') {
     activeSoftwareCount += 1;
     usingSoftwareSlot = true;
   }
@@ -321,6 +397,21 @@ function spawnEncoder(camera, entry, encoder) {
       return;
     }
 
+    // A remux-only ("copy") attempt dying almost immediately usually means
+    // the cached codec read was stale or wrong (camera profile/firmware
+    // changed since it was probed, or ffprobe misread a non-H.264 stream) —
+    // forget that cached codec so the next start re-probes instead of
+    // looping on a copy attempt that can never succeed, and fall back to a
+    // normal encode for this attempt so the camera isn't left dark.
+    if (encoder === 'copy' && code !== 0 && ranMs < 4000 && !fellBack) {
+      fellBack = true;
+      videoCodecByCamera.delete(camera.id);
+      logEvent(camera.id, 'stream_error', 'Mode copy (tanpa re-encode) gagal, beralih ke re-encode');
+      const fallbackEncoder = (settings.getSetting('hwaccel_mode') === 'software' || qsvKnownUnavailable || activeQsvCount >= QSV_CONCURRENCY_LIMIT) ? 'x264' : 'qsv';
+      spawnEncoder(camera, entry, fallbackEncoder);
+      return;
+    }
+
     // Unexpected disconnect (network blip, camera reboot, RTSP timeout) —
     // retry with exponential backoff instead of leaving the camera dark
     // until someone notices and clicks "Live" again. Keep retrying no
@@ -341,7 +432,7 @@ function spawnEncoder(camera, entry, encoder) {
       // has no effect on a stream that's already mid-retry: every future
       // attempt keeps reusing the credentials it started with.
       const fresh = getCameraById(camera.id) || camera;
-      spawnEncoder(fresh, entry, preferredEncoder());
+      spawnEncoder(fresh, entry, preferredEncoder(fresh));
     }, delay);
   });
 }
@@ -375,7 +466,7 @@ function startStream(camera) {
     stableTimer: null,
   };
   activeStreams.set(camera.id, entry);
-  spawnEncoder(camera, entry, preferredEncoder());
+  spawnEncoder(camera, entry, preferredEncoder(camera));
   logEvent(camera.id, 'stream_started', 'Live stream dimulai');
   return entry;
 }
