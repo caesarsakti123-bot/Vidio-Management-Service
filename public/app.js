@@ -1812,7 +1812,13 @@ $('#stream-start-all-btn')?.addEventListener('click', async () => {
 
 $('#stream-stop-all-btn')?.addEventListener('click', async () => {
   const btn = $('#stream-stop-all-btn');
-  const targets = state.cameras.filter((c) => c.stream_sub.active);
+  // Must also catch cameras that are 'reconnecting'/queued (waiting on a
+  // software encoder slot, entry.alive still false) — filtering on .active
+  // alone left every queued camera out of the stop loop entirely, so a mass
+  // "Nyalakan Semua" left hundreds of cameras perpetually fighting over the
+  // 5 software slots even after clicking "Hentikan Semua", since they were
+  // never actually told to stop.
+  const targets = state.cameras.filter((c) => c.stream_sub.active || c.stream_sub.reconnecting || c.stream_sub.queued);
   if (targets.length === 0) return;
   btn.disabled = true;
   try {
