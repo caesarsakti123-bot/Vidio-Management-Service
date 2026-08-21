@@ -1291,6 +1291,21 @@ function renderGrid() {
   for (const cam of camerasToShow) {
     if (cam.stream_sub.active) activeIds.add(cam.id);
   }
+  // "Nyalakan Halaman Ini" fires stream/start for a whole page of cameras,
+  // staggered server-side, but only calls loadCameras() once at the very
+  // end — so every one of them goes from "no player" to "needs startPlayer()"
+  // in this same renderGrid() pass. Calling startPlayer() for all of them
+  // synchronously opens that many hls.js manifest fetches in the same tick,
+  // which blows straight through the browser's 6-connections-per-host cap
+  // (see the focus-view comment above): most of the requests just sit
+  // queued by the browser itself, long enough to trip hls.js's own load
+  // timeout before they're even sent — so the whole page can fail to load
+  // at once even though the server is serving every one of them fine.
+  // Staggering the *client-side* startPlayer() calls too (not just the
+  // server-side start requests) keeps the number of concurrent manifest
+  // fetches low enough that each one actually gets a connection.
+  let newPlayerStartCount = 0;
+  const GRID_PLAYER_START_STAGGER_MS = 200;
   for (const id of activeIds) {
     const cam = state.cameras.find((c) => c.id === id);
     if (!cam || !cam.stream_sub.active) {
@@ -1337,7 +1352,15 @@ function renderGrid() {
       // and cause a visible hiccup for playback that was never interrupted.
       if (idsResumingFromPagedOut.has(id)) state.players.get(id).startLoad();
     } else if (!focusViewOpen) {
-      startPlayer(id, `/streams/${id}/sub/index.m3u8`);
+      const playlistUrl = `/streams/${id}/sub/index.m3u8`;
+      const delay = newPlayerStartCount * GRID_PLAYER_START_STAGGER_MS;
+      newPlayerStartCount += 1;
+      setTimeout(() => {
+        // Re-check on fire, not just at schedule time — renderGrid() may have
+        // run again in the meantime (poll tick, layout change, camera
+        // stopped) and already started/removed this tile's player.
+        if ($(`#video-${id}`) && !state.players.has(id)) startPlayer(id, playlistUrl);
+      }, delay);
     }
   }
 }
@@ -1471,6 +1494,53 @@ function createHlsErrorHandler(hls, onGiveUp) {
   };
 }
 
+// hls.js's own defaults for a manifest that 404s (e.g. a stream/start just
+// fired but ffmpeg hasn't written its first HLS segment yet — routine for a
+// WAN/public-IP camera whose RTSP handshake takes longer than a LAN one)
+// retry *internally* with a backoff that can silently run for the better
+// part of a minute before it ever raises a fatal error. Nothing in this app
+// ever sees that — the tile just sits black with no placeholder update and
+// no call to our own onFatalError retry loop (see startPlayer), so it only
+// ever recovered by accident, whenever some unrelated action (a poll tick,
+// clicking "Hentikan Semua") happened to call loadCameras() and rebuild the
+// player from scratch. Capping the manifest retry budget here makes hls.js
+// surface that failure quickly and on a predictable timeline, so our own
+// retry (which now refetches fresh status before retrying — see
+// startPlayer's comment) is what actually recovers it, consistently, not
+// coincidence.
+// liveSyncDurationCount/liveMaxLatencyDurationCount are in units of segments
+// (server writes 2s segments — see HLS_SEGMENT_SECONDS in streaming.js), not
+// seconds. Defaults (3 / not set) keep playback right on the live edge,
+// which stutters on any minor delivery jitter (network hiccup, a slightly
+// late segment write) since there's no cushion to absorb it. Trading a
+// little more latency (~8s target, ~12s before a hard catch-up seek) for
+// noticeably smoother playback — 12s max still stays inside the server's
+// own 6-segment/12s retention window (hls_list_size), so a catch-up seek
+// never lands on a segment that's already rolled off and 404s.
+const HLS_CONFIG = {
+  manifestLoadPolicy: {
+    default: {
+      maxTimeToFirstByteMs: 8000,
+      maxLoadTimeMs: 10000,
+      timeoutRetry: { maxNumRetry: 1, retryDelayMs: 1000, maxRetryDelayMs: 1000 },
+      errorRetry: { maxNumRetry: 2, retryDelayMs: 1000, maxRetryDelayMs: 2000 },
+    },
+  },
+  liveSyncDurationCount: 4,
+  liveMaxLatencyDurationCount: 6,
+};
+
+// Independent of whatever HLS_CONFIG's manifestLoadPolicy actually ends up
+// doing — hls.js's exact retry-policy config shape has drifted across
+// versions, and a policy object it doesn't recognize is silently ignored
+// rather than erroring, so there's no reliable way to *prove* it's in effect
+// from here. This is the real backstop: if the manifest hasn't parsed within
+// this window, something is stuck (browser 6-connections-per-host queueing,
+// a slow WAN camera, hls.js's own retry running long) and force a retry
+// ourselves rather than leaving the tile black forever with nothing in the
+// console to explain why.
+const HLS_STALL_TIMEOUT_MS = 10000;
+
 // Shared by grid tiles (startPlayer) and the focus view modal — a single
 // code path for attaching hls.js (or native HLS on Safari/iOS) to a
 // <video>, so the two can't silently drift apart in how they set up or
@@ -1478,13 +1548,20 @@ function createHlsErrorHandler(hls, onGiveUp) {
 // notifying the caller, so callers never need to re-destroy.
 function attachHlsPlayer(video, playlistUrl, onFatalError) {
   if (Hls.isSupported()) {
-    const hls = new Hls();
+    const hls = new Hls(HLS_CONFIG);
     hls.loadSource(playlistUrl);
     hls.attachMedia(video);
-    hls.on(Hls.Events.ERROR, createHlsErrorHandler(hls, () => {
+    let gaveUp = false;
+    const giveUp = () => {
+      if (gaveUp) return;
+      gaveUp = true;
+      clearTimeout(stallTimer);
       hls.destroy();
       onFatalError();
-    }));
+    };
+    const stallTimer = setTimeout(giveUp, HLS_STALL_TIMEOUT_MS);
+    hls.once(Hls.Events.MANIFEST_PARSED, () => clearTimeout(stallTimer));
+    hls.on(Hls.Events.ERROR, createHlsErrorHandler(hls, giveUp));
     video.play().catch(() => {});
     return hls;
   }
@@ -1506,14 +1583,22 @@ function startPlayer(id, playlistUrl) {
     if (!placeholder) return;
     placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
     placeholder.classList.remove('hidden');
-    setTimeout(() => {
+    setTimeout(async () => {
+      if (!$(`#video-${id}`)) return; // tile no longer on screen (paginated away, filtered out, camera deleted)
+      // Gating retry on state.cameras alone trusted a snapshot that can be
+      // up to 15s stale (state.pollTimer) or older — a WAN/public-IP camera
+      // routinely takes longer than that to finish its RTSP handshake and
+      // write its first HLS segment, so the stream would already be genuinely
+      // live server-side while this stayed stuck on the pre-start "not
+      // active" snapshot and never retried. Refetch first so the decision is
+      // based on current reality, not whatever the last poll happened to
+      // catch. loadCameras() -> renderGrid() already starts a player for any
+      // visible tile whose stream is now active and has none, so the
+      // explicit startPlayer() below is just a fallback for whatever edge
+      // case that pass didn't already cover (e.g. focus view was open then).
+      await loadCameras();
       const cam = state.cameras.find((c) => c.id === id);
-      // Grid tiles run the 'sub' profile — gating retry on cam.stream.active
-      // (the main-profile flag) meant a sub stream that was still alive and
-      // simply slow to write its first HLS segment (e.g. queued behind
-      // SOFTWARE_CONCURRENCY_LIMIT) never got retried after hls.js gave up,
-      // leaving the tile stuck black/"mencoba lagi..." forever.
-      if (cam?.stream_sub?.active && $(`#video-${id}`)) startPlayer(id, playlistUrl);
+      if (cam?.stream_sub?.active && $(`#video-${id}`) && !state.players.has(id)) startPlayer(id, playlistUrl);
     }, 3000);
   });
   if (hls) state.players.set(id, hls);
@@ -1636,6 +1721,27 @@ function openFocusView(cameraId) {
   focusCameraId = cameraId;
   $('#focus-modal').classList.remove('hidden');
   renderFocusModal(cam);
+
+  // Grid tiles only ever run the lightweight 'sub' profile — focus view is
+  // often the first time this camera's full-quality 'main' stream is needed
+  // at all, and nothing else starts it automatically. Without this, opening
+  // focus view just showed a black tile with a "Live" button sitting right
+  // there doing nothing until the user noticed and clicked it themselves.
+  // Relay cameras have nothing to start centrally (the remote agent decides
+  // when to push), and an unconfigured camera has no RTSP URL to start.
+  if (!cam.is_relay && cam.rtsp_url && !cam.stream.active) {
+    api(`/cameras/${cameraId}/stream/start`, { method: 'POST' })
+      .then(() => loadCameras())
+      .then(() => {
+        // User may have closed this modal or opened a different camera
+        // while the start request was in flight — don't clobber whatever
+        // they're looking at now with a stale render of the old one.
+        if (focusCameraId !== cameraId || $('#focus-modal').classList.contains('hidden')) return;
+        const freshCam = state.cameras.find((c) => c.id === cameraId);
+        if (freshCam) renderFocusModal(freshCam);
+      })
+      .catch((e) => console.error(`Gagal menyalakan live utama untuk kamera #${cameraId}:`, e.message));
+  }
 }
 
 function closeFocusView() {
@@ -1683,7 +1789,13 @@ function renderFocusModal(cam) {
         if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
         placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
         placeholder.classList.remove('hidden');
-        setTimeout(() => {
+        setTimeout(async () => {
+          if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
+          // Same reasoning as startPlayer()'s retry (see its comment): don't
+          // decide off a state.cameras snapshot that can be stale by up to
+          // 15s — a slow-to-connect WAN camera can genuinely go live in that
+          // window and this would otherwise sit stuck on the old snapshot.
+          await loadCameras();
           if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
           const latestCam = state.cameras.find((c) => c.id === cam.id);
           if (latestCam) renderFocusModal(latestCam);
