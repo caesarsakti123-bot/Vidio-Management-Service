@@ -6,6 +6,7 @@
 //
 // Usage (from /var/www/vms):
 //   node codec-check.js
+require('dotenv').config();
 const { spawnSync } = require('child_process');
 const { db, decryptCamera } = require('./src/db');
 
