@@ -1201,6 +1201,8 @@ select:focus-visible,
 .status-pill.motion-on { color: var(--warn); border-color: rgba(245,165,36,0.3); }
 .status-pill.reconnecting { color: var(--warn); border-color: rgba(245,165,36,0.3); }
 .status-pill.reconnecting .status-dot { background: var(--warn); animation: pulse-dot 1.2s ease-in-out infinite; }
+.status-pill.failing { color: var(--rec); border-color: rgba(239,68,68,0.3); }
+.status-pill.failing .status-dot { background: var(--rec); animation: pulse-dot 1.2s ease-in-out infinite; }
 @keyframes pulse-dot {
   0%, 100% { box-shadow: 0 0 4px var(--warn); opacity: 1; }
   50% { box-shadow: 0 0 10px var(--warn); opacity: 0.5; }

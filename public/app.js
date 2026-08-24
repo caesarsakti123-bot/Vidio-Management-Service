@@ -840,17 +840,46 @@ const LAYOUTS = {
 // then. Truncated (ffmpeg stderr excerpts can run to hundreds of chars);
 // full text still available via the title attribute (hover) for whoever
 // needs it.
+// status.state (from streaming.js's getStatus()) collapses the three
+// situations that used to all show as one generic "Reconnecting" into
+// something an operator can act on differently:
+//  - 'queued'     — waiting on a server-side resource (encoder slot or CPU
+//                    throttle), not a camera problem. Nothing to do; it'll
+//                    start on its own.
+//  - 'connecting' — a normal, still-fresh RTSP reconnect attempt.
+//  - 'failing'    — the same reconnect loop, but past FAILING_RETRY_THRESHOLD
+//                    attempts server-side — worth a look (bad credentials,
+//                    unreachable camera, wrong codec).
 function streamPlaceholderInfo(status, rtspUrl) {
   if (!rtspUrl) return { text: 'RTSP belum diatur — lakukan ONVIF probe', title: '', isError: false };
-  if (status.reconnecting) {
+  if (status.state === 'queued') {
+    const text = status.queuedReason === 'cpu_throttle' ? 'Menunggu CPU server turun...' : 'Mengantre slot encoder...';
+    return { text, title: status.lastError || '', isError: false };
+  }
+  if (status.state === 'failing') {
     if (status.lastError) {
       const oneLine = status.lastError.replace(/\s+/g, ' ').trim();
       const short = oneLine.length > 90 ? `${oneLine.slice(0, 90)}…` : oneLine;
-      return { text: `Gagal konek: ${short}`, title: oneLine, isError: true };
+      return { text: `Gagal konek (percobaan ke-${status.retryCount}): ${short}`, title: oneLine, isError: true };
     }
+    return { text: `Gagal konek berulang (percobaan ke-${status.retryCount})`, title: '', isError: true };
+  }
+  if (status.state === 'connecting') {
     return { text: 'Menyambung ulang...', title: '', isError: false };
   }
   return { text: 'Klik "Live" untuk mulai menonton', title: '', isError: false };
+}
+
+// Shared status-pill styling/label for the grid tile and focus modal, keyed
+// off the same status.state — see streamPlaceholderInfo above.
+function liveStatusPillInfo(status) {
+  switch (status.state) {
+    case 'live': return { cls: 'live-on', label: 'Live' };
+    case 'queued': return { cls: 'reconnecting', label: 'Mengantre' };
+    case 'connecting': return { cls: 'reconnecting', label: 'Menyambung...' };
+    case 'failing': return { cls: 'failing', label: `Gagal (${status.retryCount}x)` };
+    default: return { cls: '', label: 'Live' };
+  }
 }
 
 function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
@@ -889,6 +918,7 @@ function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
   const camLocation = state.locations.find((l) => l.id === cam.location_id);
   const hasMenuItems = tileActionMenuItems(cam).length > 0;
   const subPlaceholder = streamPlaceholderInfo(cam.stream_sub, cam.rtsp_url);
+  const subPill = liveStatusPillInfo(cam.stream_sub);
 
   tile.innerHTML = `
     <div class="tile-video">
@@ -896,7 +926,7 @@ function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
       <video id="video-${cam.id}" muted playsinline></video>
       <div class="placeholder ${cam.stream_sub.active ? 'hidden' : ''}${subPlaceholder.isError ? ' placeholder-error' : ''}" id="placeholder-${cam.id}" title="${escapeHtml(subPlaceholder.title)}">${escapeHtml(subPlaceholder.text)}</div>
       <div class="status-badge">
-        <span class="status-pill ${cam.stream_sub.active ? 'live-on' : (cam.stream_sub.reconnecting ? 'reconnecting' : '')}"><span class="status-dot live"></span>${cam.stream_sub.reconnecting && !cam.stream_sub.active ? 'Reconnecting' : 'Live'}</span>
+        <span class="status-pill ${subPill.cls}"><span class="status-dot live"></span>${subPill.label}</span>
         <span class="status-pill ${cam.recording_active ? 'rec-on' : ''}"><span class="status-dot rec"></span>Rec</span>
         <span class="status-pill ${cam.motion_active ? 'motion-on' : ''}"><span class="status-dot motion"></span>Motion</span>
       </div>
@@ -1804,8 +1834,9 @@ function renderFocusModal(cam) {
   $('#focus-title').textContent = cam.name;
   $('#focus-subtitle').textContent = `${cam.brand || 'Tidak diketahui'} · ${cam.ip}` + (camLocation?.address ? ` · ${camLocation.address}` : '');
 
-  $('#focus-status-live').className = 'status-pill' + (cam.stream.active ? ' live-on' : (cam.stream.reconnecting ? ' reconnecting' : ''));
-  $('#focus-status-live').lastChild.textContent = cam.stream.reconnecting && !cam.stream.active ? 'Reconnecting' : 'Live';
+  const focusPill = liveStatusPillInfo(cam.stream);
+  $('#focus-status-live').className = 'status-pill' + (focusPill.cls ? ` ${focusPill.cls}` : '');
+  $('#focus-status-live').lastChild.textContent = focusPill.label;
   $('#focus-status-rec').className = 'status-pill' + (cam.recording_active ? ' rec-on' : '');
   $('#focus-status-motion').className = 'status-pill' + (cam.motion_active ? ' motion-on' : '');
 

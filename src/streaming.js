@@ -265,6 +265,17 @@ function shouldLogRetry(retryCount) {
   return retryCount % 20 === 0;
 }
 
+// Retries never give up by design (see the comment above the reconnect
+// scheduling below) — a camera down for days still shows "reconnecting"
+// forever rather than some terminal "offline" state. But from an operator's
+// perspective, attempt #1 ("just reconnecting, give it a second") and
+// attempt #40 ("this has been failing for over 20 minutes, go check it")
+// are not the same situation. Reuse shouldLogRetry's own first taper
+// boundary as the cutover — by attempt 6 it's already stopped being
+// newsworthy in the event log, so it's a reasonable point to also stop
+// treating it as "still just connecting" in the UI.
+const FAILING_RETRY_THRESHOLD = 5;
+
 // When something disrupts several cameras at once (a burst of new streams
 // starting, a network blip on a shared link), plain exponential backoff has
 // them all retry in lockstep — every camera's timer fires at the same
@@ -365,6 +376,13 @@ function spawnEncoder(camera, entry, encoder, profile = 'main') {
     entry.reconnecting = true;
     if (!entry.queued) {
       entry.queued = true;
+      // Distinct from `reconnecting` alone: this camera isn't failing to
+      // connect at all, it's sitting in softwareQueue waiting on a resource
+      // the *server* is short on. getStatus() surfaces this separately so
+      // the UI can tell an operator "this will start once a slot frees" (no
+      // action needed) apart from "this keeps failing to connect" (may need
+      // action) — see the state field below.
+      entry.queuedReason = cpuThrottled ? 'cpu_throttle' : 'encoder_limit';
       lastErrorByCamera.set(key, cpuThrottled
         ? 'CPU server tinggi berkelanjutan — live view baru ditahan sementara sampai beban turun'
         : `Menunggu slot software encoder tersedia (${SOFTWARE_CONCURRENCY_LIMIT} sedang dipakai)`);
@@ -376,6 +394,7 @@ function spawnEncoder(camera, entry, encoder, profile = 'main') {
     return;
   }
   entry.queued = false;
+  entry.queuedReason = null;
 
   const dir = streamDirFor(camera.id, profile);
   const playlistPath = path.join(dir, 'index.m3u8');
@@ -541,6 +560,8 @@ function startStream(camera, profile = 'main') {
     stopRequested: false,
     reconnecting: false,
     retryCount: 0,
+    queued: false,
+    queuedReason: null,
     reconnectTimer: null,
     stableTimer: null,
   };
@@ -611,6 +632,19 @@ function stopStreamAndWait(cameraId, profile) {
 // Reports the 'main' profile by default so existing callers (dashboard grid
 // status, before sub streams existed) keep seeing the same shape as before.
 // Pass profile explicitly to check the other one.
+// Collapses entry.alive/reconnecting/queued/retryCount into a single,
+// unambiguous label for the UI — see FAILING_RETRY_THRESHOLD above for why
+// 'connecting' and 'failing' are split. Old boolean fields (active,
+// reconnecting, queued) are kept alongside `state` for existing callers
+// (e.g. the bulk stop-all sweep in app.js) that already key off them.
+function statusState(entry) {
+  if (!entry) return 'idle';
+  if (entry.alive) return 'live';
+  if (entry.queued) return 'queued';
+  if (entry.reconnecting) return entry.retryCount >= FAILING_RETRY_THRESHOLD ? 'failing' : 'connecting';
+  return 'idle';
+}
+
 function getStatus(cameraId, profile = 'main') {
   const key = streamKey(cameraId, profile);
   const entry = activeStreams.get(key);
@@ -618,6 +652,9 @@ function getStatus(cameraId, profile = 'main') {
     active: entry ? entry.alive : false,
     reconnecting: entry ? !!entry.reconnecting : false,
     queued: entry ? !!entry.queued : false,
+    queuedReason: entry ? (entry.queuedReason || null) : null,
+    retryCount: entry ? entry.retryCount : 0,
+    state: statusState(entry),
     viewers: entry ? entry.viewers : 0,
     encoder: entry ? entry.encoder : null,
     lastError: lastErrorByCamera.get(key) || null
