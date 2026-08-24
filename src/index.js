@@ -21,7 +21,7 @@ const recording = require('./recording');
 const motion = require('./motion');
 const healthcheck = require('./healthcheck');
 const healthTrendsRouter = require('./health_routes');
-const systemHealthRouter = require('./system_health');
+const systemHealth = require('./system_health');
 const bookmarksRouter = require('./bookmarks');
 
 seedAdmin();
@@ -104,7 +104,15 @@ app.use('/api/locations', requireAuth, locationsRouter);
 app.use('/api/settings', requireAuth, requireRole('admin'), settingsRouter);
 app.use('/api/alerts', requireAuth, alertsRouter);
 app.use('/api/health-trends', requireAuth, healthTrendsRouter);
-app.use('/api/system-health', requireAuth, requireRole('admin'), systemHealthRouter);
+app.use('/api/system-health', requireAuth, requireRole('admin'), systemHealth.router);
+
+// Any logged-in role (not just admin) needs to know when live view is being
+// held back by the CPU auto-throttle and why — see system_health.js. Kept
+// separate from /api/system-health so non-admins never get the full
+// per-core/memory breakdown, just the throttle flag.
+app.get('/api/system-status', requireAuth, (req, res) => {
+  res.json(systemHealth.getThrottleStatus());
+});
 
 app.get('/api/events', requireAuth, (req, res) => {
   const rows = db.prepare('SELECT * FROM events ORDER BY created_at DESC LIMIT 100').all();

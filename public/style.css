@@ -626,6 +626,26 @@ select:focus-visible,
   position: relative;
   z-index: 1;
 }
+.cpu-throttle-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.cpu-throttle-banner::before {
+  content: '⚠';
+  flex-shrink: 0;
+  font-size: 15px;
+}
+
 .main-header {
   display: flex;
   justify-content: space-between;

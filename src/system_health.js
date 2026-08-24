@@ -12,6 +12,37 @@ const SAMPLE_INTERVAL_MS = 2000;
 let lastCpuTimes = os.cpus().map((c) => c.times);
 let lastCpuPercent = { overall: 0, cores: lastCpuTimes.map(() => 0) };
 
+// Today's incident: CPU pinned at 100% for a long stretch and nothing backed
+// off on its own — a human had to notice and click "Hentikan Semua". This
+// tracks how long CPU has been *continuously* at/above CPU_CRITICAL_PERCENT
+// and flips `throttled` on once that streak crosses CPU_CRITICAL_SUSTAIN_MS,
+// so a brief spike (a burst of reconnects, one heavy export) never trips it —
+// only genuinely sustained overload does. Recovery uses a lower threshold
+// (CPU_RECOVER_PERCENT) than the trip point so it doesn't immediately flap
+// back on right at the boundary.
+const CPU_CRITICAL_PERCENT = Number(process.env.CPU_CRITICAL_PERCENT) || 90;
+const CPU_CRITICAL_SUSTAIN_MS = Number(process.env.CPU_CRITICAL_SUSTAIN_MS) || 60000;
+const CPU_RECOVER_PERCENT = Number(process.env.CPU_RECOVER_PERCENT) || 70;
+let criticalSince = null;
+let throttled = false;
+
+function updateThrottleState(percent) {
+  const now = Date.now();
+  if (percent >= CPU_CRITICAL_PERCENT) {
+    if (!criticalSince) criticalSince = now;
+    if (!throttled && now - criticalSince >= CPU_CRITICAL_SUSTAIN_MS) {
+      throttled = true;
+      console.warn(`[open-vms] CPU >= ${CPU_CRITICAL_PERCENT}% selama >= ${Math.round(CPU_CRITICAL_SUSTAIN_MS / 1000)}s — menahan live view baru sampai beban turun.`);
+    }
+  } else {
+    criticalSince = null;
+    if (throttled && percent <= CPU_RECOVER_PERCENT) {
+      throttled = false;
+      console.warn(`[open-vms] CPU turun ke ${percent}% — melepas penahanan live view baru.`);
+    }
+  }
+}
+
 function sampleCpu() {
   const current = os.cpus().map((c) => c.times);
   const cores = current.map((now, i) => {
@@ -26,9 +57,26 @@ function sampleCpu() {
   const overall = cores.length ? Math.round(cores.reduce((a, b) => a + b, 0) / cores.length) : 0;
   lastCpuTimes = current;
   lastCpuPercent = { overall, cores };
+  updateThrottleState(overall);
 }
 
 setInterval(sampleCpu, SAMPLE_INTERVAL_MS).unref();
+
+function isThrottled() {
+  return throttled;
+}
+
+// Deliberately small/unrestricted-by-role payload — any logged-in user (not
+// just admins) needs to know live view is being held back and why, without
+// exposing the full per-core/memory breakdown the admin-only /api/system-health
+// endpoint returns.
+function getThrottleStatus() {
+  return {
+    throttled,
+    cpu_percent: lastCpuPercent.overall,
+    critical_percent: CPU_CRITICAL_PERCENT,
+  };
+}
 
 function getSnapshot() {
   const totalMem = os.totalmem();
@@ -42,6 +90,8 @@ function getSnapshot() {
       // os.loadavg() is 1/5/15-min load average; always [0,0,0] on Windows,
       // where there's no OS-level concept of load average.
       load_average: os.loadavg(),
+      throttled,
+      critical_since: criticalSince ? new Date(criticalSince).toISOString() : null,
     },
     memory: {
       total_bytes: totalMem,
@@ -66,4 +116,4 @@ router.get('/', (req, res) => {
   res.json(getSnapshot());
 });
 
-module.exports = router;
+module.exports = { router, isThrottled, getThrottleStatus };

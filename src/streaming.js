@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const { logEvent, getCameraById } = require('./db');
 const settings = require('./settings');
+const systemHealth = require('./system_health');
 
 const STREAMS_DIR = path.join(__dirname, '..', 'public', 'streams');
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -126,7 +127,14 @@ let activeSoftwareCount = 0;
 const softwareQueue = [];
 
 function drainSoftwareQueue() {
-  while (softwareQueue.length > 0 && activeSoftwareCount < SOFTWARE_CONCURRENCY_LIMIT) {
+  // Also holds the queue while systemHealth reports a sustained-CPU
+  // throttle — same reasoning as the concurrency cap itself, just triggered
+  // by measured load instead of a fixed process count. Nothing already
+  // running gets killed; this only stops *new* software encodes from
+  // starting until CPU recovers. Re-checked on this same periodic timer (see
+  // softwareQueueDrainTimer below) so queued cameras resume promptly once
+  // throttle lifts, not just whenever some other stream happens to exit.
+  while (softwareQueue.length > 0 && activeSoftwareCount < SOFTWARE_CONCURRENCY_LIMIT && !systemHealth.isThrottled()) {
     const { camera, entry, profile } = softwareQueue.shift();
     if (entry.stopRequested || !activeStreams.has(streamKey(camera.id, profile))) continue;
     // Re-fetch: credentials/settings may have changed while this camera sat
@@ -135,6 +143,13 @@ function drainSoftwareQueue() {
     spawnEncoder(fresh, entry, 'x264', profile);
   }
 }
+// systemHealth's throttle flag can flip from true to false with no stream
+// ever exiting (e.g. some unrelated process on the box that was hogging CPU
+// finishes) — without a periodic nudge, cameras already parked in
+// softwareQueue would sit there until the next unrelated slot-release event
+// happened to occur, however long that took. Cheap no-op when the queue is
+// empty or still throttled/full.
+setInterval(drainSoftwareQueue, 5000).unref();
 
 // profile 'main' keeps the original, pre-sub-stream directory layout
 // (public/streams/<id>/) so existing playlist URLs/bookmarks/clients don't
@@ -344,13 +359,18 @@ function spawnEncoder(camera, entry, encoder, profile = 'main') {
   // re-dispatched through this same function once a slot frees (see
   // drainSoftwareQueue), so everything below this point can assume the
   // slot is actually available.
-  if (encoder === 'x264' && activeSoftwareCount >= SOFTWARE_CONCURRENCY_LIMIT) {
+  const cpuThrottled = encoder === 'x264' && systemHealth.isThrottled();
+  if (encoder === 'x264' && (cpuThrottled || activeSoftwareCount >= SOFTWARE_CONCURRENCY_LIMIT)) {
     entry.alive = false;
     entry.reconnecting = true;
     if (!entry.queued) {
       entry.queued = true;
-      lastErrorByCamera.set(key, `Menunggu slot software encoder tersedia (${SOFTWARE_CONCURRENCY_LIMIT} sedang dipakai)`);
-      logEvent(camera.id, 'stream_reconnecting', `Live stream (${profile}) mengantre — batas ${SOFTWARE_CONCURRENCY_LIMIT} software encoder bersamaan sedang penuh`);
+      lastErrorByCamera.set(key, cpuThrottled
+        ? 'CPU server tinggi berkelanjutan — live view baru ditahan sementara sampai beban turun'
+        : `Menunggu slot software encoder tersedia (${SOFTWARE_CONCURRENCY_LIMIT} sedang dipakai)`);
+      logEvent(camera.id, 'stream_reconnecting', cpuThrottled
+        ? `Live stream (${profile}) ditahan — CPU server tinggi berkelanjutan`
+        : `Live stream (${profile}) mengantre — batas ${SOFTWARE_CONCURRENCY_LIMIT} software encoder bersamaan sedang penuh`);
     }
     softwareQueue.push({ camera, entry, profile });
     return;

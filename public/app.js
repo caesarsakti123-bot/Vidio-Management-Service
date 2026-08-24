@@ -27,6 +27,7 @@ const state = {
   activityDays: 7,
   activityUserFilter: '',
   systemHealthTimer: null,
+  systemStatusTimer: null,
   currentRecording: null, // { id, filename, cameraLabel } for whatever's open in the player modal
 };
 
@@ -186,6 +187,9 @@ function enterApp() {
   refreshAlertBadge();
   if (state.alertPollTimer) clearInterval(state.alertPollTimer);
   state.alertPollTimer = setInterval(refreshAlertBadge, 20000);
+  loadSystemStatus();
+  if (state.systemStatusTimer) clearInterval(state.systemStatusTimer);
+  state.systemStatusTimer = setInterval(loadSystemStatus, 15000);
   resetIdleLogoutTimer();
 }
 
@@ -202,6 +206,9 @@ function logout() {
   state.alertPollTimer = null;
   if (state.systemHealthTimer) clearInterval(state.systemHealthTimer);
   state.systemHealthTimer = null;
+  if (state.systemStatusTimer) clearInterval(state.systemStatusTimer);
+  state.systemStatusTimer = null;
+  setThrottleBanner(false);
   clearAllPagedOutStopTimers();
   for (const id of state.players.keys()) stopPlayer(id);
   state.token = null;
@@ -741,6 +748,35 @@ async function loadCameras() {
     if (!$('#view-map')?.classList.contains('hidden') && mapSubTab === 'devices') renderDeviceTable();
   } catch (e) {
     console.error(e);
+  }
+}
+
+// Surfaces the server-side CPU auto-throttle (see system_health.js /
+// streaming.js) to every logged-in role, not just admins on the "Kesehatan
+// Server" tab — an operator watching the live view grid is exactly who
+// needs to know new streams are being held back and why, without having to
+// go find the health page.
+let throttleBannerShown = false;
+function setThrottleBanner(show, cpuPercent) {
+  const el = $('#cpu-throttle-banner');
+  if (!el) return;
+  if (show === throttleBannerShown) {
+    if (show) el.textContent = `CPU server sedang tinggi (${cpuPercent}%) sejak beberapa saat lalu — live view baru ditahan sementara sampai beban turun. Kamera yang sudah menyala tidak dimatikan.`;
+    return;
+  }
+  throttleBannerShown = show;
+  el.classList.toggle('hidden', !show);
+  if (show) {
+    el.textContent = `CPU server sedang tinggi (${cpuPercent}%) sejak beberapa saat lalu — live view baru ditahan sementara sampai beban turun. Kamera yang sudah menyala tidak dimatikan.`;
+  }
+}
+
+async function loadSystemStatus() {
+  try {
+    const status = await api('/system-status');
+    setThrottleBanner(!!status.throttled, status.cpu_percent);
+  } catch (e) {
+    // Non-critical — just skip this tick, next poll will retry.
   }
 }
 
@@ -1905,6 +1941,12 @@ $('#stream-start-all-btn')?.addEventListener('click', async () => {
   // once.
   const targets = getCurrentPageCameras().filter((c) => c.rtsp_url && !c.stream_sub.active);
   if (targets.length === 0) return;
+  const estSeconds = Math.round((targets.length - 1) * STREAM_START_ALL_STAGGER_MS / 1000);
+  const confirmed = await showConfirm(
+    `Nyalakan ${targets.length} live view sekaligus di halaman ini? Prosesnya bertahap (~${estSeconds} detik total) agar server tidak kelebihan beban; kamera yang tidak kebagian slot encoder akan mengantre otomatis.`,
+    { title: 'Nyalakan Halaman Ini', danger: false, confirmLabel: 'Ya, nyalakan' }
+  );
+  if (!confirmed) return;
   btn.disabled = true;
   try {
     for (let i = 0; i < targets.length; i++) {
