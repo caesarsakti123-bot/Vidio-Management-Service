@@ -13,25 +13,39 @@ const { db, decryptCamera } = require('./src/db');
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 const TIMEOUT_MS = 6000;
 
+// '-stimeout' and '-timeout' are not interchangeable names for the same
+// flag: on ffmpeg <=5.x, '-timeout' means RTSP *listen_timeout* (server
+// mode) and silently makes ffprobe open a listening socket instead of
+// connecting, while '-stimeout' is the client timeout there; on ffmpeg 8.x
+// '-stimeout' was removed entirely and '-timeout' is the only client
+// timeout. Blindly retrying with the other name (like streaming.js used to)
+// can burn a full extra timeout on a flag that does something unrelated
+// instead of actually retrying the connection. Ask the ffprobe binary
+// actually installed what it supports, once, same as streaming.js does.
+function detectTimeoutFlag() {
+  try {
+    const result = spawnSync(FFPROBE, ['-hide_banner', '-h', 'demuxer=rtsp'], { encoding: 'utf8' });
+    const helpText = `${result.stdout || ''}${result.stderr || ''}`;
+    if (/^\s*-stimeout\b/m.test(helpText)) return '-stimeout';
+  } catch (_err) {
+    // fall through to default below
+  }
+  return '-timeout';
+}
+const RTSP_TIMEOUT_FLAG = detectTimeoutFlag();
+
 function probeCodec(rtspUrl) {
   const args = [
     '-v', 'error',
     '-rtsp_transport', 'tcp',
-    '-stimeout', '5000000', // try the older flag first
+    RTSP_TIMEOUT_FLAG, '5000000',
     '-select_streams', 'v:0',
     '-show_entries', 'stream=codec_name',
     '-of', 'csv=p=0',
     rtspUrl,
   ];
-  let result = spawnSync(FFPROBE, args, { encoding: 'utf8', timeout: TIMEOUT_MS });
-  let out = (result.stdout || '').trim().toLowerCase();
-  if (!out) {
-    // retry with -timeout instead of -stimeout in case this ffprobe build
-    // doesn't support -stimeout (same flip-flop as streaming.js handles)
-    const args2 = args.map((a) => (a === '-stimeout' ? '-timeout' : a));
-    result = spawnSync(FFPROBE, args2, { encoding: 'utf8', timeout: TIMEOUT_MS });
-    out = (result.stdout || '').trim().toLowerCase();
-  }
+  const result = spawnSync(FFPROBE, args, { encoding: 'utf8', timeout: TIMEOUT_MS });
+  const out = (result.stdout || '').trim().toLowerCase();
   return out || (result.error ? `error: ${result.error.message}` : 'no response');
 }
 

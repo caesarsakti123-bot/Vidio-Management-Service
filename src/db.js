@@ -93,6 +93,23 @@ CREATE TABLE IF NOT EXISTS bookmarks (
   FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE,
   FOREIGN KEY(recording_id) REFERENCES recordings(id) ON DELETE CASCADE
 );
+
+-- Per-user "star" on a camera, purely a personal shortcut for filtering the
+-- Live View grid down to the subset one operator actually watches routinely
+-- (with 200+ cameras, scrolling the full list every time doesn't scale).
+-- Composite PK instead of a surrogate id since the only two things that ever
+-- matter are "does this user have this camera starred" (existence check) and
+-- "unstar it" (delete by the same pair) — nothing else looks favorites up by
+-- a row id. ON DELETE CASCADE on both FKs: a deleted user's stars are dead
+-- weight, and a deleted camera can't stay "favorited" for anyone.
+CREATE TABLE IF NOT EXISTS camera_favorites (
+  user_id INTEGER NOT NULL,
+  camera_id INTEGER NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, camera_id),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+);
 `);
 
 function ensureColumn(table, name, definition) {

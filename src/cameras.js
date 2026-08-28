@@ -108,6 +108,9 @@ function sanitizeName(name) {
 router.get('/', (req, res) => {
   const cameras = db.prepare('SELECT id, name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, rtsp_path_sub, rtsp_url_sub, ptz_supported, recording_enabled, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token, serial_number, firmware_version, channel_count FROM cameras ORDER BY sort_order ASC, id ASC').all();
   const isViewer = req.user.role === 'viewer';
+  const favoriteIds = new Set(
+    db.prepare('SELECT camera_id FROM camera_favorites WHERE user_id = ?').all(req.user.id).map((r) => r.camera_id)
+  );
   const withStatus = cameras.map(c => {
     const rtspUrl = decrypt(c.rtsp_url);
     const rtspUrlSub = decrypt(c.rtsp_url_sub);
@@ -143,9 +146,27 @@ router.get('/', (req, res) => {
       relay_token: isViewer ? null : c.relay_token,
       network_status: healthcheck.isOnline(c.id) ? 'online' : 'offline',
       password_strength: passwordStrength(decrypt(password)),
+      is_favorite: favoriteIds.has(c.id),
     };
   });
   res.json(withStatus);
+});
+
+// ---- Per-user favorites (personal shortcut, not shared across users) ----
+
+router.post('/:id/favorite', requireRole(['admin', 'operator', 'viewer']), (req, res) => {
+  const id = Number(req.params.id);
+  if (!db.prepare('SELECT 1 FROM cameras WHERE id = ?').get(id)) {
+    return res.status(404).json({ error: 'Kamera tidak ditemukan' });
+  }
+  db.prepare('INSERT OR IGNORE INTO camera_favorites (user_id, camera_id) VALUES (?, ?)').run(req.user.id, id);
+  res.json({ ok: true, is_favorite: true });
+});
+
+router.delete('/:id/favorite', requireRole(['admin', 'operator', 'viewer']), (req, res) => {
+  const id = Number(req.params.id);
+  db.prepare('DELETE FROM camera_favorites WHERE user_id = ? AND camera_id = ?').run(req.user.id, id);
+  res.json({ ok: true, is_favorite: false });
 });
 
 router.post('/', requireRole(['admin', 'operator']), (req, res) => {

@@ -1013,6 +1013,26 @@ select:focus-visible,
 }
 .status-filter-select:hover { border-color: var(--border-hover); }
 .status-filter-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.favorite-filter-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 9px 14px;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.favorite-filter-btn:hover { border-color: var(--border-hover); }
+.favorite-filter-btn.active {
+  background: rgba(245, 185, 66, 0.14);
+  border-color: #f5b942;
+  color: #f5b942;
+}
 .layout-picker { display: flex; gap: 8px; flex-wrap: wrap; }
 .layout-btn {
   width: 38px;
@@ -1308,6 +1328,22 @@ select:focus-visible,
   transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
 }
 .tile-menu-btn:hover { border-color: var(--accent); color: #fff; background: var(--panel-3); }
+.tile-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.favorite-btn {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.favorite-btn:hover { border-color: #f5b942; color: #f5b942; }
+.favorite-btn.active { color: #f5b942; border-color: #f5b942; background: rgba(245, 185, 66, 0.14); }
 /* Appended to <body>, not the tile — a tile-nested popup would get clipped
    by .tile's own overflow:hidden (needed to round the video's corners). */
 #tile-action-menu {

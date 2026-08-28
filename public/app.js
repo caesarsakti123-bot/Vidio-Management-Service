@@ -16,6 +16,7 @@ const state = {
   treeExpanded: new Set(),
   statusFilter: null, // null | 'active' | 'inactive'
   capabilityFilter: null, // null | 'ptz' | 'motion' | 'recording' | 'relay'
+  favoriteFilter: false,
   cameraSearch: '',
   deviceSearch: '',
   devicePage: 0,
@@ -944,10 +945,15 @@ function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
         ${camLocation?.address ? `<div class="location-address">${escapeHtml(camLocation.address)}</div>` : ''}
         <div class="meta">Motion: ${cam.motion_detection_enabled ? 'ON' : 'OFF'} · Sensitivitas: ${cam.motion_sensitivity || 0.04}</div>
       </div>
-      ${hasMenuItems ? `
-      <button class="tile-menu-btn" data-menu-toggle="${cam.id}" title="Menu aksi" aria-label="Menu aksi">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
-      </button>` : ''}
+      <div class="tile-actions">
+        <button class="favorite-btn ${cam.is_favorite ? 'active' : ''}" data-action="favorite" data-id="${cam.id}" title="${cam.is_favorite ? 'Hapus dari favorit' : 'Tandai favorit'}" aria-label="Favorit">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="${cam.is_favorite ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        </button>
+        ${hasMenuItems ? `
+        <button class="tile-menu-btn" data-menu-toggle="${cam.id}" title="Menu aksi" aria-label="Menu aksi">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+        </button>` : ''}
+      </div>
     </div>
     ${cam.ptz_supported ? `
     <div class="ptz-grid">
@@ -1479,7 +1485,9 @@ async function handleTileAction(action, id) {
   }
 
   try {
-    if (action === 'stream') {
+    if (action === 'favorite') {
+      await api(`/cameras/${id}/favorite`, { method: cam.is_favorite ? 'DELETE' : 'POST' });
+    } else if (action === 'stream') {
       // Grid tiles use the 'sub' (lightweight) profile — much cheaper for
       // ffmpeg to decode+scale+re-encode than main, so more tiles can be
       // live at once. Falls back to main-stream quality server-side for any
@@ -1853,6 +1861,17 @@ function renderFocusModal(cam) {
     if (!focusHls && !video.currentSrc) {
       focusHls = attachHlsPlayer(video, `/streams/${cam.id}/index.m3u8`, () => {
         focusHls = null;
+        // hls.js's destroy() (called just before this fires) does not
+        // reliably clear video.currentSrc back to empty in every browser —
+        // it can keep reporting the dead blob: URL indefinitely. The retry
+        // below's `!video.currentSrc` guard (in the next renderFocusModal
+        // call) then stays permanently false after the very first failure,
+        // so attachHlsPlayer() never runs again and the tile sits stuck
+        // silently (placeholder hidden, no video) no matter how many
+        // retries fire. resetFocusVideoElement() (used by openFocusView/
+        // closeFocusView already) replaces the element outright, which is
+        // the one thing that's actually proven to leave currentSrc empty.
+        resetFocusVideoElement();
         if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
         placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
         placeholder.classList.remove('hidden');
@@ -2652,6 +2671,13 @@ function renderStatusFilters() {
     });
     capSelect.value = state.capabilityFilter || '';
   }
+
+  const favBtn = $('#favorite-filter-btn');
+  if (favBtn) {
+    const favCount = state.cameras.filter((c) => c.is_favorite).length;
+    $('#favorite-filter-label').textContent = `Favorit (${favCount})`;
+    favBtn.classList.toggle('active', state.favoriteFilter);
+  }
 }
 
 $('#status-filter-select')?.addEventListener('change', (e) => {
@@ -2663,6 +2689,13 @@ $('#status-filter-select')?.addEventListener('change', (e) => {
 $('#capability-filter-select')?.addEventListener('change', (e) => {
   state.capabilityFilter = e.target.value || null;
   state.layoutPage = 0;
+  renderGrid();
+});
+
+$('#favorite-filter-btn')?.addEventListener('click', () => {
+  state.favoriteFilter = !state.favoriteFilter;
+  state.layoutPage = 0;
+  renderStatusFilters();
   renderGrid();
 });
 
@@ -2681,6 +2714,9 @@ function getVisibleCameras() {
   }
   if (state.capabilityFilter && CAPABILITY_PREDICATES[state.capabilityFilter]) {
     list = list.filter(CAPABILITY_PREDICATES[state.capabilityFilter]);
+  }
+  if (state.favoriteFilter) {
+    list = list.filter((c) => c.is_favorite);
   }
   const q = state.cameraSearch.trim().toLowerCase();
   if (q) {
