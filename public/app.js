@@ -27,6 +27,8 @@ const state = {
   eventsChartDays: 14,
   activityDays: 7,
   activityUserFilter: '',
+  activityFrom: '',
+  activityTo: '',
   systemHealthTimer: null,
   systemStatusTimer: null,
   currentRecording: null, // { id, filename, cameraLabel } for whatever's open in the player modal
@@ -156,7 +158,7 @@ $('#relay-command-copy-btn')?.addEventListener('click', () => {
 
 // ---- Auth ----
 
-$('#login-btn').addEventListener('click', async () => {
+async function attemptLogin() {
   const username = $('#login-username').value.trim();
   const password = $('#login-password').value;
   $('#login-error').textContent = '';
@@ -170,6 +172,16 @@ $('#login-btn').addEventListener('click', async () => {
   } catch (e) {
     $('#login-error').textContent = e.message;
   }
+}
+
+$('#login-btn').addEventListener('click', attemptLogin);
+// The username/password inputs aren't inside a <form>, so pressing Enter
+// does nothing by default — wire it up manually instead of requiring a
+// mouse click on "Masuk".
+['#login-username', '#login-password'].forEach((sel) => {
+  $(sel).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') attemptLogin();
+  });
 });
 
 function enterApp() {
@@ -451,20 +463,49 @@ async function populateActivityUserFilter() {
   } catch (e) { console.error(e); }
 }
 
+// A `days` argument means "quick-range chip clicked" — switches back to
+// relative-days mode and clears any custom from/to range. Called with no
+// argument (user filter changed, custom range applied) just re-runs with
+// whatever mode is currently active.
 async function loadUserActivity(days) {
-  state.activityDays = days;
+  if (days !== undefined) {
+    state.activityDays = days;
+    state.activityFrom = '';
+    state.activityTo = '';
+    if ($('#activity-from')) $('#activity-from').value = '';
+    if ($('#activity-to')) $('#activity-to').value = '';
+  }
+  const usingCustomRange = !!(state.activityFrom || state.activityTo);
   document.querySelectorAll('#activity-range-picker .chip').forEach((btn) => {
-    btn.classList.toggle('active', Number(btn.dataset.days) === days);
+    btn.classList.toggle('active', !usingCustomRange && Number(btn.dataset.days) === state.activityDays);
   });
   await populateActivityUserFilter();
   try {
-    const qs = new URLSearchParams({ days });
+    const qs = new URLSearchParams();
+    if (usingCustomRange) {
+      if (state.activityFrom) qs.set('from', state.activityFrom);
+      if (state.activityTo) qs.set('to', state.activityTo);
+    } else {
+      qs.set('days', state.activityDays);
+    }
     if (state.activityUserFilter) qs.set('user_id', state.activityUserFilter);
     const data = await api(`/users/activity?${qs.toString()}`);
     renderActivityTable(data.rows || []);
   } catch (e) {
     console.error(e);
   }
+}
+
+// <input type="datetime-local"> gives "YYYY-MM-DDTHH:MM" in the browser's
+// local time with no offset — the ISO date-time form, which per spec (and
+// every browser's Date parser) is read as local time, so this correctly
+// converts to the UTC "YYYY-MM-DD HH:MM:SS" shape created_at is stored in
+// (same convention parseServerDate() above relies on for display).
+function datetimeLocalToServerFormat(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().replace('T', ' ').substring(0, 19);
 }
 
 // SQLite's CURRENT_TIMESTAMP (used for events.created_at) stores a
@@ -509,7 +550,37 @@ $('#activity-range-picker')?.addEventListener('click', (e) => {
 
 $('#activity-user-filter')?.addEventListener('change', (e) => {
   state.activityUserFilter = e.target.value;
-  loadUserActivity(state.activityDays);
+  loadUserActivity();
+});
+
+$('#activity-apply-range-btn')?.addEventListener('click', () => {
+  const fromVal = datetimeLocalToServerFormat($('#activity-from').value);
+  const toVal = datetimeLocalToServerFormat($('#activity-to').value);
+  if (!fromVal && !toVal) return;
+  state.activityFrom = fromVal;
+  state.activityTo = toVal;
+  loadUserActivity();
+});
+
+$('#activity-clear-range-btn')?.addEventListener('click', () => {
+  loadUserActivity(state.activityDays || 7);
+});
+
+// Chrome's native datetime-local picker stays open for as long as the input
+// has focus — clicking inside the field again just repositions the caret
+// between segments, it doesn't toggle the popup shut the way a custom
+// dropdown would. Blurring an already-focused field is what actually closes
+// it, so fake a click-to-toggle by blurring on the second click instead of
+// letting it refocus.
+['#activity-from', '#activity-to'].forEach((sel) => {
+  const el = $(sel);
+  if (!el) return;
+  el.addEventListener('mousedown', (e) => {
+    if (document.activeElement === el) {
+      e.preventDefault();
+      el.blur();
+    }
+  });
 });
 
 let editingUserId = null;
@@ -2519,7 +2590,14 @@ $('#location-dropdown-btn')?.addEventListener('click', (e) => {
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#location-tree-panel') && !e.target.closest('#location-dropdown-btn')) closeLocationDropdown();
 });
-window.addEventListener('scroll', closeLocationDropdown, true);
+// Capture-phase so scrolling the sidebar/main content (which would leave
+// the fixed-positioned panel floating over the wrong spot) closes it — but
+// scroll events from inside the panel's own list must NOT close it, or the
+// panel would slam shut the instant you tried to scroll it.
+window.addEventListener('scroll', (e) => {
+  if (e.target?.closest?.('#location-tree-panel')) return;
+  closeLocationDropdown();
+}, true);
 window.addEventListener('resize', closeLocationDropdown);
 
 function updateLocationDropdownLabel() {
@@ -3081,10 +3159,15 @@ function showDevSrvView() {
 function initMapIfNeeded() {
   if (!leafletMap && typeof L !== 'undefined') {
     leafletMap = L.map('location-map').setView([-2.5, 118], 5);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+    // Plain OpenStreetMap raster tiles — no API key, no quota wall (unlike
+    // the CARTO dark_all tiles this replaced, which started showing an
+    // "API KEY REQUIRED" watermark instead of the map once CARTO's free
+    // anonymous quota changed). Dark look is faked with a CSS filter on
+    // just the tile pane (see .leaflet-tile-pane in style.css) instead of
+    // depending on a third-party dark-styled tile server that can vanish.
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19,
-      subdomains: 'abcd',
     }).addTo(leafletMap);
     leafletMap.on('click', (e) => openLocationModal(null, e.latlng));
   }
@@ -3223,6 +3306,39 @@ $('#cam-add-location-btn')?.addEventListener('click', () => {
 $('#location-cancel-btn')?.addEventListener('click', () => {
   locationModalSource = null;
   closeLocationModal();
+});
+
+// Address search (Nominatim/OpenStreetMap, no API key needed) — lets an
+// admin type the camera's real street address and get an accurate pin,
+// instead of relying only on the auto IP geolocation (city/ISP-level at
+// best) or eyeballing a drag on the map.
+$('#loc-geocode-btn')?.addEventListener('click', async () => {
+  const query = $('#loc-geocode-query').value.trim();
+  const msg = $('#loc-geocode-msg');
+  msg.className = 'form-msg';
+  if (!query) { msg.textContent = 'Ketik alamat dulu.'; msg.classList.add('error'); return; }
+  msg.textContent = 'Mencari...';
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`, {
+      headers: { Accept: 'application/json' },
+    });
+    const results = await res.json();
+    if (!Array.isArray(results) || results.length === 0) {
+      msg.textContent = 'Alamat tidak ditemukan. Coba lebih spesifik atau klik langsung di peta.';
+      msg.classList.add('error');
+      return;
+    }
+    const { lat, lon, display_name } = results[0];
+    $('#loc-lat').value = Number(lat).toFixed(6);
+    $('#loc-lng').value = Number(lon).toFixed(6);
+    if (!$('#loc-address').value.trim()) $('#loc-address').value = display_name;
+    if (leafletMap) leafletMap.setView([Number(lat), Number(lon)], 16);
+    msg.textContent = 'Titik ditemukan — cek di peta, geser pin kalau masih perlu disesuaikan.';
+    msg.classList.add('ok');
+  } catch (e) {
+    msg.textContent = 'Pencarian gagal, coba lagi.';
+    msg.classList.add('error');
+  }
 });
 
 $('#location-save-btn')?.addEventListener('click', async () => {

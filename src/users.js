@@ -73,10 +73,24 @@ router.delete('/:id', (req, res) => {
 // (stream reconnects, health checks, motion triggers) so the signal here
 // stays readable.
 router.get('/activity', (req, res) => {
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
   const userId = req.query.user_id ? Number(req.query.user_id) : null;
-  const conditions = [`created_at >= datetime('now', ?)`, `(actor_id IS NOT NULL OR type = 'user_login_failed')`];
-  const params = [`-${days} days`];
+  const conditions = [`(actor_id IS NOT NULL OR type = 'user_login_failed')`];
+  const params = [];
+
+  // Custom from/to range (sent as "YYYY-MM-DD HH:MM:SS" UTC, same shape as
+  // created_at) takes priority over the quick "last N days" chips — the
+  // frontend only sends one or the other, never both.
+  const from = req.query.from ? String(req.query.from) : '';
+  const to = req.query.to ? String(req.query.to) : '';
+  if (from || to) {
+    if (from) { conditions.push('created_at >= ?'); params.push(from); }
+    if (to) { conditions.push('created_at <= ?'); params.push(to); }
+  } else {
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+    conditions.push(`created_at >= datetime('now', ?)`);
+    params.push(`-${days} days`);
+  }
+
   if (userId) {
     conditions.push('actor_id = ?');
     params.push(userId);
@@ -88,7 +102,7 @@ router.get('/activity', (req, res) => {
     ORDER BY created_at DESC
     LIMIT 300
   `).all(...params);
-  res.json({ days, rows });
+  res.json({ rows });
 });
 
 module.exports = router;

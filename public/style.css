@@ -126,6 +126,31 @@ select:focus-visible,
   outline-offset: 2px;
 }
 
+/* Baseline press feedback for every clickable control. Scoped broadly so
+   icon buttons, menu items, etc. that don't define their own :active still
+   get an instant, tactile response instead of feeling "dead" on click —
+   components below with their own tuned :active rule simply out-specificity
+   this default. -webkit-tap-highlight-color kills the gray flash Android/iOS
+   browsers draw on tap, which otherwise fights with our own hover/active
+   styling and reads as janky. */
+button:not(:disabled),
+[role="button"],
+.nav-item,
+.tree-row,
+.tree-leaf,
+.alert-item,
+.location-status-row,
+.map-popup-cam-row {
+  -webkit-tap-highlight-color: transparent;
+}
+button:not(:disabled) {
+  touch-action: manipulation;
+  transform: translateZ(0);
+}
+button:not(:disabled):active {
+  transform: scale(0.96);
+}
+
 .hidden { display: none !important; }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
@@ -424,9 +449,10 @@ select:focus-visible,
   padding: 6px;
   border-radius: 8px;
   flex-shrink: 0;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
 .alert-bell:hover { background: var(--panel-3); color: var(--text); }
+.alert-bell:active { transform: scale(0.88); }
 .alert-bell-badge {
   position: absolute;
   top: 1px;
@@ -488,9 +514,10 @@ select:focus-visible,
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-soft);
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, filter 0.1s ease;
 }
 .alert-item:hover { background: var(--panel-3); }
+.alert-item:active { background: var(--panel-3); filter: brightness(0.92); }
 .alert-item.unread { background: rgba(79, 140, 255, 0.06); }
 .alert-item-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
 .alert-item-body { flex: 1; min-width: 0; }
@@ -548,6 +575,7 @@ select:focus-visible,
   color: var(--text);
 }
 .nav-item:hover { transform: translateX(2px); }
+.nav-item:active { transform: translateX(2px) scale(0.97); }
 .nav-item.active {
   /* Was hardcoded #fff — fine in dark mode (--panel there is near-black,
      so white text on this soft, low-opacity accent tint still stood out),
@@ -899,9 +927,10 @@ select:focus-visible,
   padding: 10px 12px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, transform 0.1s ease;
 }
 .location-status-row:hover { background: var(--panel-2); }
+.location-status-row:active { background: var(--panel-2); transform: scale(0.99); }
 .location-status-counts { display: flex; flex-direction: column; gap: 3px; }
 .location-count-pill {
   display: inline-flex;
@@ -1026,8 +1055,10 @@ select:focus-visible,
   font-family: inherit;
   cursor: pointer;
   white-space: nowrap;
+  transition: border-color 0.15s ease, transform 0.1s ease;
 }
 .favorite-filter-btn:hover { border-color: var(--border-hover); }
+.favorite-filter-btn:active { transform: scale(0.95); }
 .favorite-filter-btn.active {
   background: rgba(245, 185, 66, 0.14);
   border-color: #f5b942;
@@ -1045,10 +1076,11 @@ select:focus-visible,
   border-radius: var(--radius-sm);
   color: var(--text-dim);
   cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
 }
 .layout-btn svg { width: 18px; height: 18px; }
 .layout-btn:hover { border-color: var(--border-hover); color: var(--text); }
+.layout-btn:active { transform: scale(0.9); }
 .layout-btn.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   border-color: transparent;
@@ -1085,6 +1117,7 @@ select:focus-visible,
   transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
 }
 .layout-pager button:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+.layout-pager button:active:not(:disabled) { transform: scale(0.88); filter: brightness(0.95); }
 .layout-pager button:disabled { opacity: 0.3; cursor: default; background: var(--panel-3); box-shadow: none; }
 @keyframes pager-pulse-in {
   from { opacity: 0; transform: scale(0.9); }
@@ -1255,7 +1288,7 @@ select:focus-visible,
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
 .promote-btn svg { width: 13px; height: 13px; }
 .promote-btn:hover {
@@ -1263,6 +1296,7 @@ select:focus-visible,
   border-color: transparent;
   color: #fff;
 }
+.promote-btn:active { transform: scale(0.88); }
 
 .tile-info {
   padding: 12px 14px 10px;
@@ -1325,9 +1359,10 @@ select:focus-visible,
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease, transform 0.1s ease;
 }
 .tile-menu-btn:hover { border-color: var(--accent); color: #fff; background: var(--panel-3); }
+.tile-menu-btn:active { transform: scale(0.88); }
 .tile-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .favorite-btn {
   width: 26px;
@@ -1341,8 +1376,10 @@ select:focus-visible,
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
 }
 .favorite-btn:hover { border-color: #f5b942; color: #f5b942; }
+.favorite-btn:active { transform: scale(0.88); }
 .favorite-btn.active { color: #f5b942; border-color: #f5b942; background: rgba(245, 185, 66, 0.14); }
 /* Appended to <body>, not the tile — a tile-nested popup would get clipped
    by .tile's own overflow:hidden (needed to round the video's corners). */
@@ -1414,9 +1451,10 @@ select:focus-visible,
   border-radius: var(--radius-sm);
   color: var(--text);
   cursor: pointer;
-  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease, transform 0.1s ease;
 }
 .tile-controls button:hover { border-color: var(--accent); color: #fff; background: var(--panel-3); }
+.tile-controls button:active { transform: scale(0.94); }
 .tile-controls button[data-action="delete"]:hover { border-color: var(--rec); color: var(--rec); }
 .ptz-grid {
   display: grid;
@@ -1488,6 +1526,12 @@ select:focus-visible,
   line-height: 1.5;
 }
 .leaflet-pane, .leaflet-control { filter: none; }
+/* Fake a dark basemap from plain (light) OpenStreetMap tiles: invert then
+   hue-rotate back roughly restores natural-ish water/land tones instead of
+   a literal photo-negative look. Scoped to just the tile image pane so our
+   own markers/popups/zoom control (styled dark on purpose already) aren't
+   double-inverted. */
+.leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9); }
 .leaflet-popup-content-wrapper {
   background: var(--panel-2);
   color: var(--text);
@@ -1513,9 +1557,10 @@ select:focus-visible,
   padding: 6px 2px;
   cursor: pointer;
   border-radius: 4px;
-  transition: background 0.12s ease;
+  transition: background 0.12s ease, transform 0.1s ease;
 }
 .map-popup-cam-row:hover { background: var(--panel-3); }
+.map-popup-cam-row:active { transform: scale(0.98); }
 .map-popup-cam-row .status-dot.online { background: var(--live); box-shadow: 0 0 6px var(--live); }
 .map-popup-cam-name {
   font-size: 12px;
@@ -1591,9 +1636,10 @@ select:focus-visible,
   font-size: 12.5px;
   font-family: inherit;
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
 }
 .location-dropdown-btn:hover { border-color: var(--border-hover); background: var(--panel-3); }
+.location-dropdown-btn:active { transform: translateY(1px); }
 .location-dropdown-btn.open { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .location-dropdown-icon { flex-shrink: 0; color: var(--text-faint); }
 .location-dropdown-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
@@ -1634,9 +1680,10 @@ select:focus-visible,
   cursor: pointer;
   font-size: 13px;
   color: var(--text-dim);
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
 .tree-row:hover { background: var(--panel-3); color: var(--text); }
+.tree-row:active { transform: scale(0.98); filter: brightness(0.95); }
 .tree-row.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .tree-toggle {
   background: transparent;
@@ -1680,9 +1727,10 @@ select:focus-visible,
   cursor: pointer;
   font-size: 12.5px;
   color: var(--text-faint);
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
 .tree-leaf:hover { background: var(--panel-3); color: var(--text); }
+.tree-leaf:active { transform: scale(0.98); filter: brightness(0.95); }
 .tree-cam-dot {
   width: 6px;
   height: 6px;
@@ -1706,9 +1754,10 @@ select:focus-visible,
   padding: 6px 14px;
   border-radius: 20px;
   cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
 }
 .chip:hover { border-color: var(--border-hover); color: var(--text); }
+.chip:active { transform: scale(0.95); }
 .chip.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   border-color: transparent;
@@ -1733,9 +1782,10 @@ select:focus-visible,
   font-family: inherit;
   padding: 10px 16px;
   cursor: pointer;
-  transition: color 0.15s ease, border-color 0.15s ease;
+  transition: color 0.15s ease, border-color 0.15s ease, opacity 0.1s ease;
 }
 .sub-tab:hover { color: var(--text-dim); }
+.sub-tab:active { opacity: 0.65; }
 .sub-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
 .events-list { display: flex; flex-direction: column; gap: 8px; }
@@ -1790,6 +1840,8 @@ select:focus-visible,
 .table-wrap table { min-width: 560px; }
 #devices-table-wrap { max-height: 65vh; overflow-y: auto; }
 #devices-table-wrap thead th { position: sticky; top: 0; z-index: 1; }
+#activity-table-wrap { max-height: 65vh; overflow-y: auto; }
+#activity-table-wrap thead th { position: sticky; top: 0; z-index: 1; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--border-soft); }
 th {
@@ -1814,9 +1866,10 @@ tbody tr:last-child td { border-bottom: none; }
   border-radius: var(--radius-sm);
   color: var(--text);
   cursor: pointer;
-  transition: border-color 0.12s ease, color 0.12s ease;
+  transition: border-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
 }
 .row-actions button:hover { border-color: var(--accent); color: #fff; }
+.row-actions button:active { transform: scale(0.94); }
 .row-actions button.danger { color: var(--rec); border-color: rgba(239,68,68,0.3); }
 .row-actions button.danger:hover { border-color: var(--rec); background: var(--rec-soft); }
 
@@ -2149,7 +2202,7 @@ input[type="checkbox"]:checked::after {
 }
 .location-field label { color: var(--text); font-weight: 600; font-size: 12.5px; }
 .location-field-row { display: flex; gap: 8px; }
-.location-field-row select { flex: 1; }
+.location-field-row select, .location-field-row input { flex: 1; }
 .location-field-row .btn.secondary { white-space: nowrap; font-size: 12px; padding: 9px 12px; }
 .field-row { display: flex; gap: 10px; }
 .field-row .field { flex: 1; }
@@ -2168,9 +2221,10 @@ input[type="checkbox"]:checked::after {
   background: var(--panel-2);
   color: var(--text-dim);
   cursor: pointer;
-  transition: border-color 0.12s ease, color 0.12s ease;
+  transition: border-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
 }
 .icon-back-btn:hover { border-color: var(--border-hover); color: var(--text); }
+.icon-back-btn:active { transform: scale(0.9); }
 #device-detail-open-link { text-decoration: none; }
 .device-detail-panel {
   background: linear-gradient(155deg, var(--panel) 0%, var(--panel-deep) 100%);
@@ -2304,7 +2358,21 @@ input[type="checkbox"]:checked::after {
 .file-input-name { font-size: 12.5px; color: var(--text-dim); }
 
 /* ---- Aktivitas Pengguna ---- */
-.activity-filters { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.activity-filters { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.activity-filters-sep { color: var(--border-hover); }
+.activity-range-label { font-size: 12.5px; color: var(--text-dim); }
+.activity-filters input[type="datetime-local"] {
+  padding: 8px 10px;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  color-scheme: dark;
+}
+:root[data-theme="light"] .activity-filters input[type="datetime-local"] { color-scheme: light; }
+.activity-filters input[type="datetime-local"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .activity-filters select {
   padding: 8px 12px;
   background: var(--panel-3);
@@ -2721,6 +2789,7 @@ html, body { overflow-x: hidden; } /* belt-and-suspenders: nothing should be abl
 .bulk-action-bar-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 
 .tile.bulk-selectable { cursor: pointer; }
+.tile.bulk-selectable:active { transform: scale(0.98); }
 .tile.bulk-selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
 .bulk-select-checkbox {

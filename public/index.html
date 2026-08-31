@@ -537,8 +537,15 @@
         <select id="activity-user-filter">
           <option value="">Semua User</option>
         </select>
+        <span class="activity-filters-sep">|</span>
+        <label class="activity-range-label" for="activity-from">Dari</label>
+        <input type="datetime-local" id="activity-from" />
+        <label class="activity-range-label" for="activity-to">Sampai</label>
+        <input type="datetime-local" id="activity-to" />
+        <button type="button" class="btn secondary" id="activity-apply-range-btn">Terapkan</button>
+        <button type="button" class="btn secondary" id="activity-clear-range-btn">Reset</button>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap" id="activity-table-wrap">
         <table>
           <thead><tr><th>Waktu</th><th>User</th><th>Aksi</th><th>Detail</th></tr></thead>
           <tbody id="activity-tbody"></tbody>
@@ -1176,6 +1183,15 @@
     <div class="field">
       <label>Alamat (opsional)</label>
       <input id="loc-address" type="text" placeholder="Jl. Contoh No. 1, Jakarta" />
+    </div>
+    <div class="field">
+      <label>Cari titik dari alamat asli</label>
+      <div class="location-field-row">
+        <input id="loc-geocode-query" type="text" placeholder="Ketik alamat lengkap kamera, lalu cari" />
+        <button type="button" class="btn secondary" id="loc-geocode-btn">Cari</button>
+      </div>
+      <p class="field-hint">Lebih akurat daripada koordinat otomatis dari IP kamera (yang cuma sampai level kota) — pakai ini untuk membetulkan pin yang meleset.</p>
+      <p class="form-msg" id="loc-geocode-msg"></p>
     </div>
     <div class="field-row">
       <div class="field">
