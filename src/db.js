@@ -112,6 +112,22 @@ CREATE TABLE IF NOT EXISTS camera_favorites (
 );
 `);
 
+// NVR sources — connection details for NVR/DVR devices (Hikvision, etc.)
+db.exec(`
+CREATE TABLE IF NOT EXISTS nvr_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  ip TEXT NOT NULL,
+  port INTEGER DEFAULT 80,
+  rtsp_port INTEGER DEFAULT 554,
+  username TEXT,
+  password TEXT,
+  brand TEXT DEFAULT 'hikvision',
+  channels INTEGER DEFAULT 16,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+`);
+
 function ensureColumn(table, name, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
   const exists = columns.some((col) => col.name === name);
@@ -146,6 +162,8 @@ ensureColumn('cameras', 'rtsp_url_sub', 'TEXT');
 ensureColumn('events', 'acknowledged', 'INTEGER DEFAULT 0');
 ensureColumn('events', 'actor_id', 'INTEGER');
 ensureColumn('events', 'actor_username', 'TEXT');
+ensureColumn('cameras', 'nvr_source_id', 'INTEGER REFERENCES nvr_sources(id)');
+ensureColumn('cameras', 'nvr_channel', 'INTEGER');
 db.exec('CREATE INDEX IF NOT EXISTS idx_events_actor_id ON events(actor_id)');
 // health_routes.js's /trends query filters `WHERE type IN (camera_offline,
 // camera_online)` over the *entire* events table — it can't bound by
@@ -157,14 +175,38 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_events_actor_id ON events(actor_id)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(type, created_at)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_bookmarks_camera_id ON bookmarks(camera_id)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_bookmarks_recording_id ON bookmarks(recording_id)');
+// recordings had no index at all — reconcileAndCleanup (recording.js) runs
+// an unindexed `WHERE camera_id = ?` lookup/update per file, once per
+// camera per hourly pass, and segments rotate every 10 minutes (~144
+// files/camera/day). Since better-sqlite3 is synchronous, that full table
+// scan runs on Node's single thread and blocks every other request
+// (streaming, API, auth) for its duration — and only gets worse as
+// retention_days or camera count grows toward the "200+ cameras" scale
+// this app targets (see comment below). camera_id-first composite also
+// covers the plain `WHERE camera_id = ?` queries (recordings_routes.js,
+// recording.js) via its leading column.
+db.exec('CREATE INDEX IF NOT EXISTS idx_recordings_camera_started ON recordings(camera_id, started_at)');
+// relay.js's findCameraByToken() runs this lookup on every single HLS
+// segment a relay agent pushes (every ~2s per relay camera) — the hottest
+// per-request path in that file, previously unindexed.
+db.exec('CREATE INDEX IF NOT EXISTS idx_cameras_relay_token ON cameras(relay_token)');
 
 function seedAdmin() {
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(process.env.ADMIN_USERNAME || 'admin');
+  const username = process.env.ADMIN_USERNAME || 'admin';
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
   if (!existing) {
-    const hash = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10);
+    // Only reached the very first time this app starts against a fresh
+    // database (an admin row already existing skips this entirely) — but
+    // that's exactly the moment a silent 'admin123' fallback matters most,
+    // seeding a publicly-known credential nobody is prompted to change.
+    const password = process.env.ADMIN_PASSWORD;
+    if (!password || password === 'admin123' || password.length < 8) {
+      throw new Error('ADMIN_PASSWORD tidak diatur, masih nilai default "admin123", atau kurang dari 8 karakter di .env — wajib diisi password yang kuat sebelum akun admin pertama dibuat.');
+    }
+    const hash = bcrypt.hashSync(password, 10);
     db.prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)')
-      .run(process.env.ADMIN_USERNAME || 'admin', hash, 'admin');
-    console.log(`[db] Seeded admin user "${process.env.ADMIN_USERNAME || 'admin'}"`);
+      .run(username, hash, 'admin');
+    console.log(`[db] Seeded admin user "${username}"`);
   }
 }
 

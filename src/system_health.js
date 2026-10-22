@@ -23,22 +23,41 @@ let lastCpuPercent = { overall: 0, cores: lastCpuTimes.map(() => 0) };
 const CPU_CRITICAL_PERCENT = Number(process.env.CPU_CRITICAL_PERCENT) || 90;
 const CPU_CRITICAL_SUSTAIN_MS = Number(process.env.CPU_CRITICAL_SUSTAIN_MS) || 60000;
 const CPU_RECOVER_PERCENT = Number(process.env.CPU_RECOVER_PERCENT) || 70;
+// Recovery needs to be sustained too, symmetric to the trip condition above
+// — a single instantaneous low sample (a brief idle gap between encoder
+// restarts, a GC pause skewing the delta) used to clear `throttled`
+// immediately on its own, letting streaming.js's drainSoftwareQueue() start
+// new software encoders right as CPU rockets back to critical a couple
+// seconds later — reproducing the exact overload this mechanism exists to
+// prevent. Shorter than the trip sustain window on purpose: a real recovery
+// should still be noticed reasonably promptly, just not on one lucky sample.
+const CPU_RECOVER_SUSTAIN_MS = Number(process.env.CPU_RECOVER_SUSTAIN_MS) || 10000;
 let criticalSince = null;
+let recoverableSince = null;
 let throttled = false;
 
 function updateThrottleState(percent) {
   const now = Date.now();
   if (percent >= CPU_CRITICAL_PERCENT) {
     if (!criticalSince) criticalSince = now;
+    recoverableSince = null;
     if (!throttled && now - criticalSince >= CPU_CRITICAL_SUSTAIN_MS) {
       throttled = true;
       console.warn(`[open-vms] CPU >= ${CPU_CRITICAL_PERCENT}% selama >= ${Math.round(CPU_CRITICAL_SUSTAIN_MS / 1000)}s — menahan live view baru sampai beban turun.`);
     }
   } else {
     criticalSince = null;
-    if (throttled && percent <= CPU_RECOVER_PERCENT) {
-      throttled = false;
-      console.warn(`[open-vms] CPU turun ke ${percent}% — melepas penahanan live view baru.`);
+    if (throttled) {
+      if (percent <= CPU_RECOVER_PERCENT) {
+        if (!recoverableSince) recoverableSince = now;
+        if (now - recoverableSince >= CPU_RECOVER_SUSTAIN_MS) {
+          throttled = false;
+          recoverableSince = null;
+          console.warn(`[open-vms] CPU turun ke ${percent}% selama >= ${Math.round(CPU_RECOVER_SUSTAIN_MS / 1000)}s — melepas penahanan live view baru.`);
+        }
+      } else {
+        recoverableSince = null;
+      }
     }
   }
 }

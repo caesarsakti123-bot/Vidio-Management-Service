@@ -21,11 +21,19 @@ function isConfigured() {
 // Built fresh per send (not cached) so a config change from the Pengaturan
 // page takes effect on the very next email, no restart needed.
 function buildTransporter() {
+  const port = Number(settings.getSetting('smtp_port')) || 587;
+  // Port 465 is implicit TLS — the socket is TLS from the first byte.
+  // Everything else (587, the common Office 365/Gmail STARTTLS port; 25)
+  // connects plain and upgrades via STARTTLS instead. Hardcoding `secure:
+  // false` regardless of port made every provider on 465 fail the
+  // handshake outright, with the failure never surfacing beyond a
+  // console.error from sendMail()'s catch.
+  const secure = port === 465;
   return nodemailer.createTransport({
     host: settings.getSetting('smtp_host'),
-    port: Number(settings.getSetting('smtp_port')) || 587,
-    secure: false, // Office 365 / most providers on 587 use STARTTLS, not implicit TLS
-    requireTLS: true,
+    port,
+    secure,
+    requireTLS: !secure,
     auth: { user: settings.getSetting('smtp_user'), pass: settings.getSetting('smtp_pass') },
   });
 }

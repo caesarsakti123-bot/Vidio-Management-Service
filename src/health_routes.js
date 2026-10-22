@@ -53,7 +53,13 @@ function computeTrend(events, windowStart, windowEnd) {
 }
 
 router.get('/trends', (req, res) => {
-  const days = Math.min(MAX_DAYS, Math.max(1, Number(req.query.days) || 7));
+  // `Number(req.query.days) || 7` would silently replace an explicit
+  // `days=0` with the default (0 is falsy) before the Math.max(1, ...)
+  // clamp ever ran — check finiteness instead so a bogus/missing value
+  // still falls back to 7, but an explicit 0 gets clamped to the
+  // documented minimum of 1 instead of jumping to 7.
+  const rawDays = req.query.days === undefined || req.query.days === '' ? NaN : Number(req.query.days);
+  const days = Math.min(MAX_DAYS, Math.max(1, Number.isFinite(rawDays) ? rawDays : 7));
   const windowEnd = Date.now();
   const windowStart = windowEnd - days * 24 * 60 * 60 * 1000;
 

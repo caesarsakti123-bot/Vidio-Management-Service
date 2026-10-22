@@ -7,9 +7,15 @@ services:
       - "4000:4000"
     environment:
       - PORT=4000
-      - JWT_SECRET=${JWT_SECRET:-ganti-dengan-string-acak-yang-panjang}
+      # No default on purpose (see src/auth.js, which also hard-fails at
+      # startup) — a silent fallback here is a publicly-known secret that
+      # forges every login token this server issues.
+      - JWT_SECRET=${JWT_SECRET:?Wajib diisi di .env — generate dengan: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      # No default on purpose (see src/db.js's seedAdmin, which also
+      # hard-fails) — a silent 'admin123' fallback seeds a publicly-known
+      # admin credential on first run.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?Wajib diisi di .env dengan password kuat (minimal 8 karakter)}
       # No default on purpose — camera passwords/RTSP URLs are AES-256-GCM
       # encrypted with this key. A silent default here would either be a
       # publicly-known secret or (worse) change on every redeploy, making

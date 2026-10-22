@@ -55,18 +55,36 @@ function getAllSettings() {
 
 const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
 
+function computeStoredValue(key, value) {
+  return String(SENSITIVE_KEYS.has(key) && value ? encrypt(value) : (value ?? ''));
+}
+
 function setSetting(key, value) {
-  const toStore = SENSITIVE_KEYS.has(key) && value ? encrypt(value) : (value ?? '');
-  upsert.run(key, String(toStore));
+  const toStore = computeStoredValue(key, value);
+  upsert.run(key, toStore);
   ensureLoaded();
-  cache[key] = String(toStore);
+  cache[key] = toStore;
 }
 
 function setSettings(obj) {
-  const applyAll = db.transaction((entries) => {
-    for (const [key, value] of entries) setSetting(key, value);
+  ensureLoaded();
+  // Compute every value (encrypt() can throw, e.g. a missing/invalid
+  // CAMERA_ENCRYPTION_KEY while smtp_pass is in this batch) before writing
+  // or touching the cache at all. Previously this delegated to setSetting()
+  // per key inside db.transaction() — db.transaction()'s automatic ROLLBACK
+  // on a mid-batch throw only undoes the SQL writes already made by earlier
+  // keys in the batch, not the plain `cache[key] = ...` mutations
+  // setSetting() had already made for them, leaving getSetting() reporting
+  // values the DB had just rolled back until the next process restart
+  // reloads the cache from disk. Precomputing up front means either every
+  // key in the batch commits to both the DB and the cache, or (on a throw)
+  // neither is touched for any of them.
+  const entries = Object.entries(obj).map(([key, value]) => [key, computeStoredValue(key, value)]);
+  const applyAll = db.transaction((rows) => {
+    for (const [key, toStore] of rows) upsert.run(key, toStore);
   });
-  applyAll(Object.entries(obj));
+  applyAll(entries);
+  for (const [key, toStore] of entries) cache[key] = toStore;
 }
 
 module.exports = { getSetting, getAllSettings, setSetting, setSettings, DEFAULTS };

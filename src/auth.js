@@ -2,12 +2,29 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { db, logEvent } = require('./db');
 
-const SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
+// Unlike CAMERA_ENCRYPTION_KEY (crypto.js), this used to silently fall back
+// to a hardcoded, publicly-known default — every token this server ever
+// issued or verified would be forgeable by anyone who read this file if an
+// operator forgot to set JWT_SECRET in .env. Fail loudly at startup instead,
+// the same way crypto.js already does for the encryption key.
+const SECRET = process.env.JWT_SECRET;
+if (!SECRET || SECRET === 'dev-secret-change-me' || SECRET.length < 32) {
+  throw new Error('JWT_SECRET tidak diatur, terlalu pendek (minimal 32 karakter), atau masih nilai default di .env — generate dengan: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+}
+
+// bcrypt.compareSync's runtime is driven by the hash's cost factor, not by
+// whether the account it's checked against is real — comparing against this
+// whenever the username doesn't exist keeps a "no such user" response
+// taking as long as a "wrong password" one, instead of returning near-
+// instantly on `!user` and letting response time alone reveal which
+// usernames exist.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync('dummy-password-for-timing-safety', 10);
 
 function login(req, res) {
   const { username, password } = req.body;
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  if (!user || !bcrypt.compareSync(password || '', user.password_hash)) {
+  const passwordOk = bcrypt.compareSync(password || '', user ? user.password_hash : DUMMY_PASSWORD_HASH);
+  if (!user || !passwordOk) {
     // No actor to attach (the credentials never resolved to a real user) —
     // the attempted username lives in the message instead, still useful for
     // spotting brute-force attempts in the activity log.
@@ -57,7 +74,16 @@ function requireAuth(req, res, next) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : (req.query.token || null);
   if (!token) return res.status(401).json({ error: 'Token tidak ditemukan' });
   try {
-    req.user = jwt.verify(token, SECRET);
+    const payload = jwt.verify(token, SECRET);
+    // The JWT's `role` claim is frozen at login time, valid for up to 12h
+    // (see login() above) — trusting it directly meant demoting or deleting
+    // a user had zero effect until their existing token happened to expire
+    // on its own. Re-reading the current role (and that the account still
+    // exists) from the DB on every request makes both take effect
+    // immediately instead.
+    const user = db.prepare('SELECT id, username, role FROM users WHERE id = ?').get(payload.id);
+    if (!user) return res.status(401).json({ error: 'Token tidak valid atau kedaluwarsa' });
+    req.user = user;
     next();
   } catch (e) {
     return res.status(401).json({ error: 'Token tidak valid atau kedaluwarsa' });

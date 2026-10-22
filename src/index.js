@@ -23,6 +23,8 @@ const healthcheck = require('./healthcheck');
 const healthTrendsRouter = require('./health_routes');
 const systemHealth = require('./system_health');
 const bookmarksRouter = require('./bookmarks');
+const nvrPlaybackRouter = require('./nvr_playback_routes');
+const nvrPlayback = require('./nvr_playback');
 
 seedAdmin();
 recording.startCleanupScheduler();
@@ -71,6 +73,28 @@ app.get('/api/branding', (req, res) => {
   res.json({ app_name: settings.getSetting('app_name'), logo_path: settings.getSetting('logo_path') });
 });
 
+// Public: PWA manifest, generated per-request (not a static file) so the
+// name reflects the same configurable app_name used elsewhere in branding,
+// instead of drifting from it.
+app.get('/manifest.json', (req, res) => {
+  const appName = settings.getSetting('app_name') || 'Open VMS';
+  res.setHeader('Content-Type', 'application/manifest+json');
+  res.json({
+    name: appName,
+    short_name: appName.length > 12 ? appName.slice(0, 12) : appName,
+    start_url: '/',
+    display: 'standalone',
+    background_color: '#0a0c10',
+    theme_color: '#0a0c10',
+    orientation: 'any',
+    icons: [
+      { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/icons/icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    ],
+  });
+});
+
 // Static frontend
 // no-cache (not no-store) on the app shell: browsers still revalidate via
 // ETag on every load (cheap 304 if unchanged) instead of serving a
@@ -91,6 +115,9 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 app.use('/streams', (req, res, next) => {
   const m = req.path.match(/^\/(\d+)(\/sub)?\//);
   if (m) streaming.touchStream(Number(m[1]), m[2] ? 'sub' : 'main');
+  // NVR playback HLS segments — touch session to prevent idle cleanup
+  const nvrMatch = req.path.match(/^\/(nvr-[^/]+)\//);
+  if (nvrMatch) nvrPlayback.touchSession(nvrMatch[1]);
   next();
 });
 app.use('/streams', express.static(path.join(__dirname, '..', 'public', 'streams')));
@@ -104,6 +131,7 @@ app.use('/api/locations', requireAuth, locationsRouter);
 app.use('/api/settings', requireAuth, requireRole('admin'), settingsRouter);
 app.use('/api/alerts', requireAuth, alertsRouter);
 app.use('/api/health-trends', requireAuth, healthTrendsRouter);
+app.use('/api/nvr', requireAuth, nvrPlaybackRouter);
 app.use('/api/system-health', requireAuth, requireRole('admin'), systemHealth.router);
 
 // Any logged-in role (not just admin) needs to know when live view is being
@@ -115,7 +143,24 @@ app.get('/api/system-status', requireAuth, (req, res) => {
 });
 
 app.get('/api/events', requireAuth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM events ORDER BY created_at DESC LIMIT 100').all();
+  const cameraId = req.query.camera_id ? Number(req.query.camera_id) : null;
+  const type = req.query.type ? String(req.query.type) : '';
+  // Same "YYYY-MM-DD HH:MM:SS" UTC shape as created_at itself — see the
+  // identical from/to convention on GET /api/users/activity and
+  // GET /api/recordings.
+  const from = req.query.from ? String(req.query.from) : '';
+  const to = req.query.to ? String(req.query.to) : '';
+
+  const conditions = [];
+  const params = [];
+  if (cameraId) { conditions.push('camera_id = ?'); params.push(cameraId); }
+  if (type) { conditions.push('type = ?'); params.push(type); }
+  if (from) { conditions.push('created_at >= ?'); params.push(from); }
+  if (to) { conditions.push('created_at <= ?'); params.push(to); }
+
+  const hasFilter = conditions.length > 0;
+  const sql = `SELECT * FROM events${hasFilter ? ` WHERE ${conditions.join(' AND ')}` : ''} ORDER BY created_at DESC${hasFilter ? '' : ' LIMIT 100'}`;
+  const rows = db.prepare(sql).all(...params);
   res.json(rows);
 });
 
@@ -203,6 +248,7 @@ function shutdown() {
   console.log('\n[open-vms] Mematikan server, menghentikan semua stream & recording...');
   streaming.stopAll();
   recording.stopAll();
+  nvrPlayback.stopAll();
   motion.stopAll();
   healthcheck.stop();
   if (server) {

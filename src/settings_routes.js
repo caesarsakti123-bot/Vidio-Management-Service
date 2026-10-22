@@ -111,6 +111,24 @@ router.put('/', (req, res) => {
       return res.status(400).json({ error: 'Retensi rekaman minimal 1 hari' });
     }
   }
+  // Previously unvalidated: a non-numeric/out-of-range port or a malformed
+  // address saved fine ({ok:true}) and every subsequent notification email
+  // (camera offline/online, test email) then failed silently — visible only
+  // as a console.error on the server, nowhere in the UI.
+  if ('smtp_port' in body) {
+    const n = Number(body.smtp_port);
+    if (!Number.isFinite(n) || n < 1 || n > 65535) {
+      return res.status(400).json({ error: 'Port SMTP tidak valid (harus angka 1-65535)' });
+    }
+  }
+  if ('notify_email_to' in body && body.notify_email_to) {
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    // nodemailer's `to` accepts a comma-separated list of addresses.
+    const emails = String(body.notify_email_to).split(',').map((e) => e.trim()).filter(Boolean);
+    if (emails.length === 0 || !emails.every((e) => EMAIL_RE.test(e))) {
+      return res.status(400).json({ error: 'Alamat email notifikasi tidak valid (pisahkan dengan koma kalau lebih dari satu)' });
+    }
+  }
 
   settings.setSettings(body);
   if ('health_check_interval_min' in body) healthcheck.reschedule();
@@ -126,6 +144,17 @@ router.post('/logo', (req, res) => {
     if (!verifyImageMagicBytes(req.file.path, req.file.mimetype)) {
       fs.unlink(req.file.path, () => {});
       return res.status(400).json({ error: 'Isi file tidak cocok dengan format gambar yang diklaim — upload dibatalkan' });
+    }
+
+    // multer's filename fn above always writes `logo<ext for this upload's
+    // mimetype>`, which overwrites the previous logo in place only when the
+    // format is unchanged. Re-uploading in a *different* format (e.g.
+    // logo.png -> logo.webp) writes a new file and leaves the old one
+    // behind — still reachable forever at its old /uploads/ path since
+    // public/ is served statically with no auth.
+    const prevFilename = (settings.getSetting('logo_path') || '').split('?')[0].split('/').pop();
+    if (prevFilename && /^logo\.(png|jpg|webp)$/.test(prevFilename) && prevFilename !== req.file.filename) {
+      fs.unlink(path.join(UPLOADS_DIR, prevFilename), () => {});
     }
 
     const logoPath = `/uploads/${req.file.filename}?v=${Date.now()}`; // cache-bust on re-upload

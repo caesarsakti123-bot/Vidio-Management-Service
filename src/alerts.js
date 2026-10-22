@@ -1,5 +1,6 @@
 const express = require('express');
 const { db } = require('./db');
+const { requireRole } = require('./auth');
 
 const router = express.Router();
 
@@ -27,8 +28,18 @@ router.get('/count', (req, res) => {
   res.json({ count: row.n });
 });
 
+// Acknowledging clears an alert from every admin/operator's alarm center
+// with no per-user tracking of who dismissed it — previously open to any
+// authenticated role including viewer, who could "mark all read" and make a
+// real ongoing outage (e.g. camera_offline) silently disappear for the
+// people who could actually act on it.
+router.use(requireRole(['admin', 'operator']));
+
 router.post('/:id/ack', (req, res) => {
-  db.prepare('UPDATE events SET acknowledged = 1 WHERE id = ?').run(Number(req.params.id));
+  // Scoped to ALERT_TYPES like every other query in this file — previously
+  // this was the one query that didn't, so it would flip `acknowledged` on
+  // any event id at all, not just alert-type ones.
+  db.prepare(`UPDATE events SET acknowledged = 1 WHERE id = ? AND type IN (${placeholders})`).run(Number(req.params.id), ...ALERT_TYPES);
   res.json({ ok: true });
 });
 

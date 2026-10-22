@@ -249,6 +249,35 @@ function isRecording(cameraId) {
   return activeRecorders.has(cameraId);
 }
 
+// Full paths currently being sent by GET /:id/download or /:id/stream
+// (recordings_routes.js) — reconcileAndCleanup below consults this so the
+// hourly retention sweep never unlinks a file out from under an in-flight
+// download/stream (a real race: a large/slow download of a file that's
+// right at the retention cutoff when the hourly scan happens to run).
+// Skipping it here just defers that file to the next hourly pass instead.
+const filesCurrentlyServing = new Set();
+function markServing(filePath) { filesCurrentlyServing.add(filePath); }
+function unmarkServing(filePath) { filesCurrentlyServing.delete(filePath); }
+
+const FILENAME_TIME_RE = /rec_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/;
+
+// ffmpeg writes segment filenames via `-strftime 1` (buildArgs above) in the
+// server's *local* time (glibc strftime uses localtime(), not UTC) — parse
+// that back out so recordings.started_at reflects when the segment actually
+// began instead of whenever this hourly scan happens to discover the file
+// on disk (up to ~59 minutes later, since SEGMENT_SECONDS segments rotate
+// every 10 minutes but this only runs hourly). Mirrors bookmarks.js's
+// identical computeOccurredAt() conversion.
+function startedAtFromFilename(filename, fallbackMs) {
+  const m = filename.match(FILENAME_TIME_RE);
+  const [, y, mo, d, h, mi, s] = m ? m.map(Number) : [];
+  const date = m ? new Date(y, mo - 1, d, h, mi, s) : new Date(fallbackMs);
+  // Match the naive-but-UTC "YYYY-MM-DD HH:MM:SS" shape SQLite's
+  // CURRENT_TIMESTAMP produces, so every existing started_at consumer
+  // (recordings list/filter, the player, the timeline) keeps working as-is.
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
 // Scan recordings directories, register new files into DB, and delete files older than retention.
 function reconcileAndCleanup() {
   const rawRetentionDays = Number(settings.getSetting('retention_days'));
@@ -260,7 +289,16 @@ function reconcileAndCleanup() {
     const dir = camDir(cam.id);
     if (!fs.existsSync(dir)) continue;
 
-    for (const filename of fs.readdirSync(dir)) {
+    // Segment filenames are "rec_YYYY-MM-DD_HH-MM-SS.mp4" (-strftime 1,
+    // buildArgs above), so lexical sort order is also chronological order.
+    // Seeded from the last already-registered segment's started_at so the
+    // very first newly-discovered file in this pass still has something
+    // correct to diff against (not just files discovered within this same
+    // pass) — see the overrun check below.
+    const lastRow = db.prepare('SELECT started_at FROM recordings WHERE camera_id = ? ORDER BY started_at DESC LIMIT 1').get(cam.id);
+    let previousStartMs = lastRow ? Date.parse(`${lastRow.started_at.replace(' ', 'T')}Z`) : null;
+
+    for (const filename of fs.readdirSync(dir).sort()) {
       // One bad file (locked by an in-progress download, transient fs
       // error, ...) must not abort cleanup for every other file/camera in
       // this pass.
@@ -271,12 +309,40 @@ function reconcileAndCleanup() {
         // Register in DB if not present
         const existing = db.prepare('SELECT id FROM recordings WHERE camera_id = ? AND filename = ?').get(cam.id, filename);
         if (!existing) {
-          db.prepare('INSERT INTO recordings (camera_id, filename, size_bytes) VALUES (?, ?, ?)')
-            .run(cam.id, filename, stat.size);
+          const startedAt = startedAtFromFilename(filename, stat.mtimeMs);
+          const startedAtMs = Date.parse(`${startedAt.replace(' ', 'T')}Z`);
+          db.prepare('INSERT INTO recordings (camera_id, filename, size_bytes, started_at) VALUES (?, ?, ?, ?)')
+            .run(cam.id, filename, stat.size, startedAt);
+
+          // In 'copy' (remux) mode the segment muxer can only cut on a
+          // keyframe already present in the source stream (buildArgs has no
+          // -force_key_frames — that option requires re-encoding, which
+          // 'copy' mode exists specifically to avoid) — a camera with a long
+          // GOP/keyframe interval silently produces oversized segments with
+          // no way to correct it short of switching encoders. Surface it
+          // instead of leaving it silent: this segment's actual duration is
+          // only known once the *next* one starts, which is exactly this
+          // branch on the following pass/file.
+          if (previousStartMs != null) {
+            const actualDurationMs = startedAtMs - previousStartMs;
+            if (actualDurationMs > SEGMENT_SECONDS * 1000 * 1.5) {
+              logEvent(cam.id, 'recording_segment_overrun', `Segmen rekaman sebelumnya berdurasi ~${Math.round(actualDurationMs / 60000)} menit (seharusnya ~${SEGMENT_SECONDS / 60} menit) — kemungkinan interval keyframe kamera ini panjang untuk mode copy`);
+            }
+          }
+          previousStartMs = startedAtMs;
+        } else {
+          // Self-heals size_bytes that an earlier scan recorded mid-write
+          // (whatever segment ffmpeg still had open at that exact instant) —
+          // by the next hourly pass the file is essentially always finished
+          // (segments rotate every SEGMENT_SECONDS = 10 minutes), so
+          // refreshing here converges to the real final size within one
+          // cycle instead of freezing that first snapshot forever.
+          db.prepare('UPDATE recordings SET size_bytes = ? WHERE id = ?').run(stat.size, existing.id);
         }
 
-        // Delete + deregister if past retention
-        if (stat.mtimeMs < cutoff) {
+        // Delete + deregister if past retention (unless it's being served
+        // right now — see filesCurrentlyServing above)
+        if (stat.mtimeMs < cutoff && !filesCurrentlyServing.has(fullPath)) {
           fs.unlinkSync(fullPath);
           db.prepare('DELETE FROM recordings WHERE camera_id = ? AND filename = ?').run(cam.id, filename);
           logEvent(cam.id, 'recording_purged', `${filename} dihapus (melewati retensi ${retentionDays} hari)`);
@@ -324,4 +390,4 @@ async function startAllEnabled() {
   }
 }
 
-module.exports = { startRecording, stopRecording, stopRecordingAndWait, isRecording, startCleanupScheduler, startAllEnabled, stopAll, camDir };
+module.exports = { startRecording, stopRecording, stopRecordingAndWait, isRecording, startCleanupScheduler, startAllEnabled, stopAll, camDir, markServing, unmarkServing };

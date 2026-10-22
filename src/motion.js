@@ -56,10 +56,36 @@ function spawnDetectorProc(camera, entry) {
     entry.retryCount = 0;
   }, STABLE_AFTER_MS);
 
+  // See the matching comment in streaming.js — Node doesn't guarantee only
+  // one of 'error'/'exit' fires for a failed spawn, so `handled` prevents
+  // scheduling a reconnect twice for the same failed attempt.
+  let handled = false;
+
   proc.on('error', (err) => {
+    if (handled) return;
+    handled = true;
     if (entry.stableTimer) clearTimeout(entry.stableTimer);
-    activeDetectors.delete(camera.id);
     logEvent(camera.id, 'motion_detector_error', `Motion detector gagal dijalankan: ${err.message}`);
+
+    if (entry.stopRequested) {
+      activeDetectors.delete(camera.id);
+      logEvent(camera.id, 'motion_detector_stopped', 'Motion detection dihentikan');
+      return;
+    }
+    // Previously this just deleted the entry and gave up — unlike the
+    // 'exit' handler below, leaving motion detection permanently dead
+    // (isMotionActive() reporting false) until someone noticed and manually
+    // re-enabled it. Retry with the same backoff instead.
+    entry.retryCount = (entry.retryCount || 0) + 1;
+    const delay = withJitter(Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (entry.retryCount - 1)));
+    if (shouldLogRetry(entry.retryCount)) {
+      logEvent(camera.id, 'motion_detector_reconnecting', `Motion detector gagal dijalankan, mencoba sambung ulang dalam ${Math.round(delay / 1000)}s (percobaan ke-${entry.retryCount})`);
+    }
+    entry.reconnectTimer = setTimeout(() => {
+      if (!activeDetectors.has(camera.id) || entry.stopRequested) return;
+      const fresh = getCameraById(camera.id) || camera;
+      spawnDetectorProc(fresh, entry);
+    }, delay);
   });
 
   proc.stderr.on('data', (chunk) => {
@@ -87,6 +113,8 @@ function spawnDetectorProc(camera, entry) {
   });
 
   proc.on('exit', (code) => {
+    if (handled) return;
+    handled = true;
     if (entry.stableTimer) clearTimeout(entry.stableTimer);
 
     if (entry.stopRequested) {

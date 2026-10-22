@@ -29,12 +29,29 @@ const state = {
   activityUserFilter: '',
   activityFrom: '',
   activityTo: '',
+  recordingsCameraFilter: '',
+  recordingsFrom: '',
+  recordingsTo: '',
   systemHealthTimer: null,
   systemStatusTimer: null,
   currentRecording: null, // { id, filename, cameraLabel } for whatever's open in the player modal
 };
 
 const $ = (sel) => document.querySelector(sel);
+
+// Guards against every poller/action in flight at the moment a token
+// expires (or gets revoked server-side) each independently triggering their
+// own logout()/toast — without this, a dashboard left open past token
+// expiry would fire a burst of identical "sesi berakhir" toasts the instant
+// the next round of polling all land 401 together.
+let sessionExpiryHandled = false;
+function handleSessionExpired() {
+  if (sessionExpiryHandled) return;
+  sessionExpiryHandled = true;
+  logout();
+  showToast('Sesi berakhir, silakan login kembali', 'info');
+}
+
 const api = async (path, opts = {}) => {
   const res = await fetch(`/api${path}`, {
     ...opts,
@@ -45,6 +62,17 @@ const api = async (path, opts = {}) => {
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  // Previously a 401 (token expired, or revoked by an admin) fell through
+  // to the generic `!res.ok` branch below just like any other API error —
+  // every poller (loadCameras, refreshAlertBadge, loadSystemStatus, ...)
+  // independently console.error'd it and silently stopped updating, with
+  // nothing telling the user they'd actually been logged out. Login itself
+  // also returns 401 on wrong credentials, which is not a session-expiry
+  // event, so it's excluded here and handled by attemptLogin() instead.
+  if (res.status === 401 && path !== '/auth/login') {
+    handleSessionExpired();
+    throw new Error('Sesi berakhir, silakan login kembali');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
   return data;
@@ -64,6 +92,10 @@ function applyTheme(theme) {
     btn.querySelector('.theme-icon-moon')?.classList.toggle('hidden', theme !== 'light');
     btn.title = theme === 'light' ? 'Ganti ke mode gelap' : 'Ganti ke mode terang';
   }
+  // Keeps the browser chrome (Android address bar, iOS status bar behind
+  // the notch) tinted to match whichever theme the user actually picked,
+  // not just their OS-level light/dark preference.
+  $('#theme-color-meta')?.setAttribute('content', theme === 'light' ? '#e8ebf1' : '#0a0c10');
 }
 
 $('#theme-toggle-btn')?.addEventListener('click', () => {
@@ -72,6 +104,42 @@ $('#theme-toggle-btn')?.addEventListener('click', () => {
 });
 
 applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
+
+// ---- PWA: service worker + install prompt ----
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((err) => console.error('SW registration failed', err));
+  });
+}
+
+let deferredInstallPrompt = null;
+const installBtn = $('#install-app-btn');
+
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+if (installBtn && !isStandalone()) {
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    installBtn.classList.remove('hidden');
+  });
+
+  installBtn.addEventListener('click', async () => {
+    if (!deferredInstallPrompt) return;
+    installBtn.classList.add('hidden');
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+  });
+
+  window.addEventListener('appinstalled', () => {
+    installBtn.classList.add('hidden');
+    deferredInstallPrompt = null;
+  });
+}
 
 // ---- Toast notifications (replaces alert()) ----
 
@@ -185,6 +253,7 @@ $('#login-btn').addEventListener('click', attemptLogin);
 });
 
 function enterApp() {
+  sessionExpiryHandled = false;
   $('#login-screen').classList.add('hidden');
   $('#app').classList.remove('hidden');
   state.user = JSON.parse(localStorage.getItem('vms_user') || '{}');
@@ -192,7 +261,6 @@ function enterApp() {
   renderNavForRole();
   loadLocations();
   loadCameras();
-  loadRecordings();
   loadEvents();
   loadDashboard();
   if (state.pollTimer) clearInterval(state.pollTimer);
@@ -383,6 +451,10 @@ function renderNavForRole() {
   // above.
   const settingsLink = $('#settings-page-link');
   if (settingsLink) settingsLink.style.display = state.user.role === 'admin' ? 'inline-flex' : 'none';
+  // Acknowledging alerts is now admin/operator-only server-side (src/alerts.js)
+  // — a viewer can still see the alarm center, just not dismiss from it.
+  const ackAllBtn = $('#alert-ack-all-btn');
+  if (ackAllBtn) ackAllBtn.style.display = isViewer ? 'none' : '';
 }
 
 // ---- Branding (app name / logo) ----
@@ -519,6 +591,20 @@ function parseServerDate(str) {
   return new Date(`${str}`.replace(' ', 'T') + 'Z');
 }
 
+const FILENAME_TIME_RE = /rec_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/;
+
+// Mirrors src/bookmarks.js's computeOccurredAt(): recording filenames are
+// stamped by ffmpeg (-strftime 1) in the server's LOCAL time, but
+// recordings.started_at is only written whenever the hourly cleanup scan
+// discovers the file on disk — up to ~59 minutes after it actually started.
+// The filename is the only accurate source for exactly when a segment began.
+function parseRecordingStartTimeFromFilename(recording) {
+  const m = recording.filename.match(FILENAME_TIME_RE);
+  if (!m) return parseServerDate(recording.started_at);
+  const [, y, mo, d, h, mi, s] = m.map(Number);
+  return new Date(y, mo - 1, d, h, mi, s);
+}
+
 function renderActivityTable(rows) {
   const tbody = $('#activity-tbody');
   if (!tbody) return;
@@ -566,13 +652,76 @@ $('#activity-clear-range-btn')?.addEventListener('click', () => {
   loadUserActivity(state.activityDays || 7);
 });
 
+$('#recordings-camera-filter')?.addEventListener('change', (e) => {
+  state.recordingsCameraFilter = e.target.value;
+  loadRecordings();
+  refreshTimeline();
+});
+
+$('#recordings-apply-range-btn')?.addEventListener('click', () => {
+  state.recordingsFrom = datetimeLocalToServerFormat($('#recordings-from').value);
+  state.recordingsTo = datetimeLocalToServerFormat($('#recordings-to').value);
+  loadRecordings();
+});
+
+$('#recordings-clear-range-btn')?.addEventListener('click', () => {
+  state.recordingsFrom = '';
+  state.recordingsTo = '';
+  $('#recordings-from').value = '';
+  $('#recordings-to').value = '';
+  loadRecordings();
+});
+
+function todayLocalDateStr() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// The timeline's day is deliberately independent from the table's from/to
+// range above it — one is a quick single-day visual browse per camera, the
+// other a flexible list for a broader investigation window.
+function refreshTimeline() {
+  const section = $('#recordings-timeline-section');
+  const hint = $('#recordings-timeline-hint');
+  const cameraId = state.recordingsCameraFilter;
+  if (!cameraId) {
+    section?.classList.add('hidden');
+    hint?.classList.remove('hidden');
+    return;
+  }
+  section?.classList.remove('hidden');
+  hint?.classList.add('hidden');
+  const dateInput = $('#timeline-date');
+  if (dateInput && !dateInput.value) dateInput.value = todayLocalDateStr();
+  loadTimelineForDay(Number(cameraId), dateInput.value);
+}
+
+function stepTimelineDay(delta) {
+  const input = $('#timeline-date');
+  if (!input || !input.value) return;
+  const [y, m, d] = input.value.split('-').map(Number);
+  const next = new Date(y, m - 1, d + delta);
+  const pad = (n) => String(n).padStart(2, '0');
+  input.value = `${next.getFullYear()}-${pad(next.getMonth() + 1)}-${pad(next.getDate())}`;
+  refreshTimeline();
+}
+
+$('#timeline-prev-day-btn')?.addEventListener('click', () => stepTimelineDay(-1));
+$('#timeline-next-day-btn')?.addEventListener('click', () => stepTimelineDay(1));
+$('#timeline-today-btn')?.addEventListener('click', () => {
+  $('#timeline-date').value = todayLocalDateStr();
+  refreshTimeline();
+});
+$('#timeline-date')?.addEventListener('change', refreshTimeline);
+
 // Chrome's native datetime-local picker stays open for as long as the input
 // has focus — clicking inside the field again just repositions the caret
 // between segments, it doesn't toggle the popup shut the way a custom
 // dropdown would. Blurring an already-focused field is what actually closes
 // it, so fake a click-to-toggle by blurring on the second click instead of
 // letting it refocus.
-['#activity-from', '#activity-to'].forEach((sel) => {
+['#activity-from', '#activity-to', '#recordings-from', '#recordings-to'].forEach((sel) => {
   const el = $(sel);
   if (!el) return;
   el.addEventListener('mousedown', (e) => {
@@ -852,6 +1001,9 @@ async function loadSystemStatus() {
   }
 }
 
+let reorderSaveTimer = null;
+let reorderSaveSeq = 0;
+
 async function reorderCameras(draggedId, targetId) {
   if (draggedId === targetId) return;
   const fromIdx = state.cameras.findIndex((c) => c.id === draggedId);
@@ -870,15 +1022,28 @@ async function reorderCameras(draggedId, targetId) {
   state.cameras = reordered;
   renderGrid();
 
-  try {
-    await api('/cameras/reorder', {
-      method: 'PUT',
-      body: { items: reordered.map((c) => ({ id: c.id, sort_order: c.sort_order })) },
-    });
-  } catch (e) {
-    console.error('Gagal menyimpan urutan kamera:', e.message);
-    await loadCameras();
-  }
+  // Debounced on purpose: each drag already folds into state.cameras (and
+  // the screen) synchronously above, so the PUT body built below is always
+  // the full, cumulative order so far — firing one PUT per drag just invites
+  // the server receiving two overlapping requests out of order (a later
+  // drag's request landing first, then an earlier drag's slower request
+  // overwriting it with a stale snapshot, silently undoing the most recent
+  // move). Only the last drag in a quick sequence actually needs to reach
+  // the server; `reorderSaveSeq` makes sure a late-arriving failure from an
+  // already-superseded save doesn't reload over a newer one.
+  clearTimeout(reorderSaveTimer);
+  const seq = ++reorderSaveSeq;
+  reorderSaveTimer = setTimeout(async () => {
+    try {
+      await api('/cameras/reorder', {
+        method: 'PUT',
+        body: { items: state.cameras.map((c) => ({ id: c.id, sort_order: c.sort_order })) },
+      });
+    } catch (e) {
+      console.error('Gagal menyimpan urutan kamera:', e.message);
+      if (seq === reorderSaveSeq) await loadCameras();
+    }
+  }, 400);
 }
 
 // Fixed-slot layouts show a set number of tiles per "page" and pad any
@@ -1026,7 +1191,7 @@ function buildCameraTile(cam, isSpotlightMain, isSpotlightSidebar, enableDrag) {
         </button>` : ''}
       </div>
     </div>
-    ${cam.ptz_supported ? `
+    ${cam.ptz_supported && canEdit ? `
     <div class="ptz-grid">
       <span></span><button data-ptz="up" data-id="${cam.id}">▲</button><span></span>
       <button data-ptz="left" data-id="${cam.id}">◀</button>
@@ -1527,6 +1692,8 @@ $('#layout-next')?.addEventListener('click', () => {
   renderGrid();
 });
 
+const tileActionInFlight = new Set();
+
 async function handleTileAction(action, id) {
   if (action === 'promote') {
     state.spotlightMainId = id;
@@ -1554,6 +1721,17 @@ async function handleTileAction(action, id) {
     showRelayCommand(cam.name, cmd);
     return;
   }
+
+  // favorite/stream/record/motion/probe/delete below all branch on the
+  // *current* `cam.is_favorite` / `cam.stream_sub.active` / etc. read above
+  // — a second click landing before the loadCameras() at the end of this
+  // function refreshes that state sees the same stale value and fires the
+  // same request again (two "start"s, or a start right after what should
+  // have been a stop). Drop a repeat of the same action on the same camera
+  // while one is still in flight.
+  const inFlightKey = `${action}:${id}`;
+  if (tileActionInFlight.has(inFlightKey)) return;
+  tileActionInFlight.add(inFlightKey);
 
   try {
     if (action === 'favorite') {
@@ -1592,6 +1770,8 @@ async function handleTileAction(action, id) {
     await loadCameras();
   } catch (e) {
     showToast(e.message);
+  } finally {
+    tileActionInFlight.delete(inFlightKey);
   }
 }
 
@@ -1923,7 +2103,7 @@ function renderFocusModal(cam) {
   $('#focus-record-btn').textContent = cam.recording_active ? 'Stop rekam' : 'Rekam';
   $('#focus-motion-btn').textContent = cam.motion_detection_enabled ? 'Matikan Motion' : 'Hidupkan Motion';
   $('#focus-motion-btn').style.display = state.user.role === 'viewer' ? 'none' : '';
-  $('#focus-ptz').classList.toggle('hidden', !cam.ptz_supported);
+  $('#focus-ptz').classList.toggle('hidden', !cam.ptz_supported || state.user.role === 'viewer');
 
   const video = $('#focus-video');
   const placeholder = $('#focus-placeholder');
@@ -3142,7 +3322,12 @@ const activateDevSrvSubTab = wireTabStrip('#devsrv-sub-tabs', {
   onSwitch: (tab) => {
     devsrvSubTab = tab;
     stopSystemHealthPolling(); // only the 'system' branch below restarts it
-    if (tab === 'recordings') loadRecordings();
+    // loadRecordings() used to run here too, but it only ever populated
+    // #recordings-table/#recordings-stats — both replaced by the pb-* NVR
+    // playback page below and no longer present in index.html, so it was
+    // firing two unused /recordings + /recordings/stats requests on every
+    // visit to this tab for a UI nothing renders into.
+    if (tab === 'recordings') { if (typeof pbInit === 'function') pbInit(); }
     else if (tab === 'events') loadEvents();
     else if (tab === 'health') loadHealthTrends(state.healthTrendDays || 7);
     else if (tab === 'system') {
@@ -3386,9 +3571,29 @@ async function deleteLocation(loc) {
   }
 }
 
+// Cheap re-render from the already-loaded `state.cameras` (no extra API
+// call, unlike populateActivityUserFilter's dedicated /users fetch) — safe
+// to call on every loadRecordings() so the dropdown fills in once cameras
+// finish loading even if this ran first during app boot.
+function populateRecordingsCameraFilter() {
+  const select = $('#recordings-camera-filter');
+  if (!select || !state.cameras.length) return;
+  const current = select.value;
+  select.innerHTML = '<option value="">Semua Kamera</option>' + state.cameras
+    .map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`)
+    .join('');
+  select.value = current;
+}
+
 async function loadRecordings() {
+  populateRecordingsCameraFilter();
   try {
-    const [rows, stats] = await Promise.all([api('/recordings'), api('/recordings/stats')]);
+    const qs = new URLSearchParams();
+    if (state.recordingsCameraFilter) qs.set('camera_id', state.recordingsCameraFilter);
+    if (state.recordingsFrom) qs.set('from', state.recordingsFrom);
+    if (state.recordingsTo) qs.set('to', state.recordingsTo);
+    const query = qs.toString();
+    const [rows, stats] = await Promise.all([api(`/recordings${query ? `?${query}` : ''}`), api('/recordings/stats')]);
 
     const statsEl = $('#recordings-stats');
     if (statsEl) {
@@ -3420,7 +3625,7 @@ async function loadRecordings() {
         <tr>
           <td>${escapeHtml(camLabel)}</td>
           <td>${escapeHtml(r.filename)}</td>
-          <td>${new Date(r.started_at).toLocaleString('id-ID')}</td>
+          <td>${parseServerDate(r.started_at).toLocaleString('id-ID')}</td>
           <td>${formatBytes(r.size_bytes)}</td>
           <td class="row-actions">
             <button data-recording-action="play" data-id="${r.id}" data-filename="${escapeHtml(r.filename)}" data-camera="${escapeHtml(camLabel)}">Putar</button>
@@ -3428,7 +3633,7 @@ async function loadRecordings() {
           </td>
         </tr>
       `;
-    }).join('') || '<tr><td colspan="5" style="color:var(--text-dim)">Belum ada rekaman</td></tr>';
+    }).join('') || `<tr><td colspan="5" style="color:var(--text-dim)">${query ? 'Tidak ada rekaman untuk filter ini' : 'Belum ada rekaman'}</td></tr>`;
 
     tbody.querySelectorAll('[data-recording-action="download"]').forEach((btn) => {
       btn.addEventListener('click', () => downloadRecording(Number(btn.dataset.id), btn.dataset.filename));
@@ -3440,6 +3645,148 @@ async function loadRecordings() {
     console.error(e);
   }
 }
+
+// ---- Recordings timeline (24h bar per camera, click-to-seek) ----
+
+let timelineSegments = []; // sorted by accurate start time; also the Prev/Next sibling list
+
+function timeToServerFormat(date) {
+  return date.toISOString().replace('T', ' ').substring(0, 19);
+}
+
+async function loadTimelineForDay(cameraId, dateStr) {
+  const track = $('#timeline-track');
+  if (!track || !dateStr) return;
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dayStart = new Date(y, m - 1, d, 0, 0, 0);
+  const dayEnd = new Date(y, m - 1, d + 1, 0, 0, 0);
+  // Pad the query window past both edges to absorb started_at's up-to-~59min
+  // registration lag (see parseRecordingStartTimeFromFilename), then clip
+  // precisely afterwards using the accurate filename-derived time.
+  const padMs = 70 * 60 * 1000;
+  const queryFrom = encodeURIComponent(timeToServerFormat(new Date(dayStart.getTime() - padMs)));
+  const queryTo = encodeURIComponent(timeToServerFormat(new Date(dayEnd.getTime() + padMs)));
+
+  try {
+    const [recordings, motionEvents] = await Promise.all([
+      api(`/recordings?camera_id=${cameraId}&from=${queryFrom}&to=${queryTo}`),
+      api(`/events?camera_id=${cameraId}&type=motion_detected&from=${queryFrom}&to=${queryTo}`),
+    ]);
+
+    timelineSegments = recordings
+      .map((r) => ({ ...r, startTime: parseRecordingStartTimeFromFilename(r) }))
+      .filter((r) => r.startTime >= dayStart && r.startTime < dayEnd)
+      .sort((a, b) => a.startTime - b.startTime);
+
+    const motionTimes = motionEvents
+      .map((e) => parseServerDate(e.created_at))
+      .filter((t) => t >= dayStart && t < dayEnd);
+
+    renderTimeline(dayStart, motionTimes);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderTimeline(dayStart, motionTimes) {
+  const track = $('#timeline-track');
+  const ruler = $('#timeline-ruler');
+  if (!track) return;
+
+  if (ruler) {
+    ruler.innerHTML = [0, 4, 8, 12, 16, 20, 24].map((h) => `<span>${String(h).padStart(2, '0')}:00</span>`).join('');
+  }
+
+  // #timeline-tooltip lives inside the track (so its coordinate space
+  // matches block/click math directly) — preserve it across re-renders
+  // instead of wiping it out with the rest of the track's children.
+  const tooltip = $('#timeline-tooltip');
+  track.innerHTML = '';
+  if (tooltip) track.appendChild(tooltip);
+  timelineSegments.forEach((seg, i) => {
+    const startSec = (seg.startTime - dayStart) / 1000;
+    const next = timelineSegments[i + 1];
+    const maxDurationSec = next ? (next.startTime - seg.startTime) / 1000 : 600;
+    const durationSec = Math.max(1, Math.min(600, maxDurationSec, 86400 - startSec));
+    const block = document.createElement('div');
+    block.className = 'timeline-block';
+    block.style.left = `${(startSec / 86400) * 100}%`;
+    block.style.width = `${(durationSec / 86400) * 100}%`;
+    block.dataset.index = String(i);
+    block.dataset.duration = String(durationSec);
+    block.title = `${seg.startTime.toLocaleTimeString('id-ID')} — ${seg.filename}`;
+    track.appendChild(block);
+  });
+
+  motionTimes.forEach((t) => {
+    const sec = (t - dayStart) / 1000;
+    const tick = document.createElement('div');
+    tick.className = 'timeline-motion-tick';
+    tick.style.left = `${(sec / 86400) * 100}%`;
+    tick.dataset.time = String(t.getTime());
+    tick.title = `Motion terdeteksi: ${t.toLocaleTimeString('id-ID')}`;
+    track.appendChild(tick);
+  });
+}
+
+// Finds the segment covering (or immediately preceding) a given moment —
+// shared by both direct segment clicks and motion-tick clicks so a click
+// anywhere on the timeline resolves to a playable position.
+function findSegmentAtTime(targetDate) {
+  for (let i = 0; i < timelineSegments.length; i++) {
+    const seg = timelineSegments[i];
+    const next = timelineSegments[i + 1];
+    if (targetDate >= seg.startTime && (!next || targetDate < next.startTime)) return i;
+  }
+  for (let i = timelineSegments.length - 1; i >= 0; i--) {
+    if (timelineSegments[i].startTime <= targetDate) return i;
+  }
+  return -1;
+}
+
+function openPlayerFromTimeline(index, seekTo) {
+  const seg = timelineSegments[index];
+  if (!seg) return;
+  const cam = state.cameras.find((c) => c.id === seg.camera_id);
+  openPlayer(seg.id, seg.filename, cam ? cam.name : `Kamera #${seg.camera_id}`, seekTo, timelineSegments, index);
+}
+
+$('#timeline-track')?.addEventListener('click', (e) => {
+  const tick = e.target.closest('.timeline-motion-tick');
+  if (tick) {
+    const motionTime = new Date(Number(tick.dataset.time));
+    const index = findSegmentAtTime(motionTime);
+    if (index < 0) return;
+    const offsetSeconds = Math.max(0, (motionTime - timelineSegments[index].startTime) / 1000);
+    openPlayerFromTimeline(index, offsetSeconds);
+    return;
+  }
+  const block = e.target.closest('.timeline-block');
+  if (!block) return;
+  const index = Number(block.dataset.index);
+  const duration = Number(block.dataset.duration);
+  const rect = block.getBoundingClientRect();
+  const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  openPlayerFromTimeline(index, fraction * duration);
+});
+
+$('#timeline-track')?.addEventListener('mousemove', (e) => {
+  const tooltip = $('#timeline-tooltip');
+  const track = e.currentTarget;
+  if (!tooltip) return;
+  const rect = track.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const fraction = Math.min(1, Math.max(0, x / rect.width));
+  const totalSeconds = Math.floor(fraction * 86400);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  tooltip.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  tooltip.style.left = `${x}px`;
+  tooltip.classList.remove('hidden');
+});
+$('#timeline-track')?.addEventListener('mouseleave', () => {
+  $('#timeline-tooltip')?.classList.add('hidden');
+});
 
 const prefersReducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
@@ -3566,7 +3913,11 @@ async function downloadRecording(id, filename) {
 // unrelated offset.
 let playerSeekListener = null;
 
-function openPlayer(id, filename, cameraLabel, seekTo = 0) {
+// siblingList/index (a sorted array of that camera-day's segments + this
+// recording's position in it) enable the Prev/Next segment buttons — passed
+// by the timeline, left as defaults (nav disabled) when opened from the
+// plain recordings table or from Bookmarks, same as before this existed.
+function openPlayer(id, filename, cameraLabel, seekTo = 0, siblingList = null, index = -1) {
   const video = $('#player-video');
   if (playerSeekListener) {
     video.removeEventListener('loadedmetadata', playerSeekListener);
@@ -3575,10 +3926,14 @@ function openPlayer(id, filename, cameraLabel, seekTo = 0) {
   $('#player-title').textContent = filename;
   $('#player-subtitle').textContent = cameraLabel || '';
   video.src = `/api/recordings/${id}/stream?token=${encodeURIComponent(state.token)}`;
+  video.playbackRate = 1;
+  $('#player-speed-group')?.querySelectorAll('.chip').forEach((chip) => {
+    chip.classList.toggle('active', chip.dataset.speed === '1');
+  });
   $('#player-download-link').href = `/api/recordings/${id}/download?token=${encodeURIComponent(state.token)}`;
   $('#player-download-link').setAttribute('download', filename || 'recording.mp4');
   $('#player-bookmark-note').value = '';
-  state.currentRecording = { id, filename, cameraLabel };
+  state.currentRecording = { id, filename, cameraLabel, siblingList, index };
   if (seekTo > 0) {
     // currentTime can't be set until the browser knows the video's
     // duration/seekable range — do it once loadedmetadata fires instead of
@@ -3586,9 +3941,41 @@ function openPlayer(id, filename, cameraLabel, seekTo = 0) {
     playerSeekListener = () => { video.currentTime = seekTo; playerSeekListener = null; };
     video.addEventListener('loadedmetadata', playerSeekListener, { once: true });
   }
+  updatePlayerNavButtons();
   $('#player-modal').classList.remove('hidden');
   video.play().catch(() => {});
 }
+
+function updatePlayerNavButtons() {
+  const { siblingList, index } = state.currentRecording || {};
+  const hasList = Array.isArray(siblingList) && index >= 0;
+  const prevBtn = $('#player-prev-segment-btn');
+  const nextBtn = $('#player-next-segment-btn');
+  if (prevBtn) prevBtn.disabled = !hasList || index <= 0;
+  if (nextBtn) nextBtn.disabled = !hasList || index >= siblingList.length - 1;
+}
+
+$('#player-prev-segment-btn')?.addEventListener('click', () => {
+  const { siblingList, index, cameraLabel } = state.currentRecording || {};
+  if (!Array.isArray(siblingList) || index <= 0) return;
+  const seg = siblingList[index - 1];
+  openPlayer(seg.id, seg.filename, cameraLabel, 0, siblingList, index - 1);
+});
+
+$('#player-next-segment-btn')?.addEventListener('click', () => {
+  const { siblingList, index, cameraLabel } = state.currentRecording || {};
+  if (!Array.isArray(siblingList) || index >= siblingList.length - 1) return;
+  const seg = siblingList[index + 1];
+  openPlayer(seg.id, seg.filename, cameraLabel, 0, siblingList, index + 1);
+});
+
+$('#player-speed-group')?.addEventListener('click', (e) => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  const speed = Number(chip.dataset.speed);
+  $('#player-video').playbackRate = speed;
+  $('#player-speed-group').querySelectorAll('.chip').forEach((c) => c.classList.toggle('active', c === chip));
+});
 
 function closePlayer() {
   const video = $('#player-video');
@@ -4277,6 +4664,7 @@ wireTabStrip('#settings-sub-tabs', {
 });
 
 async function loadSettingsPage() {
+  loadNvrSources(); // Load NVR list when settings page opens
   try {
     const s = await api('/settings');
     $('#settings-app-name').value = s.app_name || '';
@@ -4460,9 +4848,18 @@ async function loadAlertPanel() {
       item.addEventListener('click', async () => {
         const id = Number(item.dataset.alertId);
         const camId = item.dataset.alertCam ? Number(item.dataset.alertCam) : null;
-        try { await api(`/alerts/${id}/ack`, { method: 'POST' }); } catch (e) { console.error(e); }
-        item.classList.remove('unread');
-        refreshAlertBadge();
+        // Acknowledging is admin/operator-only server-side (src/alerts.js) —
+        // previously this always optimistically marked the item read in the
+        // UI even when the request failed (or, for a viewer, was rejected),
+        // leaving it looking acknowledged here while staying unread for
+        // everyone else until the next reload.
+        if (state.user.role !== 'viewer') {
+          try {
+            await api(`/alerts/${id}/ack`, { method: 'POST' });
+            item.classList.remove('unread');
+            refreshAlertBadge();
+          } catch (e) { console.error(e); }
+        }
         if (camId) {
           closeAlertPanel();
           document.querySelector('.nav-item[data-view="live"]')?.click();
@@ -4512,3 +4909,1135 @@ $('#alert-ack-all-btn')?.addEventListener('click', async (e) => {
     showToast(err.message);
   }
 });
+
+
+/* ==================================================================
+   PLAYBACK PAGE — JavaScript
+   Add this to the bottom of app.js (or load as a separate script after
+   app.js).  Relies on globals from app.js:
+     state, $, api, escapeHtml, formatBytes, showToast, parseServerDate,
+     parseRecordingStartTimeFromFilename, timeToServerFormat
+   ================================================================== */
+
+// ---------------------------------------------------------------------------
+//  Playback Page State
+// ---------------------------------------------------------------------------
+const pb = {
+  cameraId: null,          // selected camera id
+  calYear: new Date().getFullYear(),
+  calMonth: new Date().getMonth(),  // 0-indexed
+  selectedDay: null,       // 1-31 or null
+  segments: [],            // timeline segments for the selected day
+  currentSegIndex: -1,     // index into pb.segments of currently playing
+  currentRecId: null,      // recording id of currently playing
+  playing: false,
+  speeds: [0.25, 0.5, 1, 2, 4, 8, 16],
+  speedIdx: 2,             // default 1×
+  playheadTimer: null,     // requestAnimationFrame id
+  dayStart: null,          // Date object for 00:00 of selected day
+  zoomLevel: 1,            // 1 = 24h view, 2 = 12h, 4 = 6h
+  daysWithRecordings: new Set(), // days in current cal month that have recordings
+  // NVR playback state
+  nvrMode: false,          // true when selected camera is NVR-linked
+  nvrSourceId: null,       // nvr_sources.id
+  nvrChannel: null,        // channel number on the NVR
+  nvrStreamId: null,       // active NVR playback stream_id (for stop)
+  nvrHlsInstance: null,    // Hls.js instance for NVR HLS playback
+};
+
+// Shorthand for playback DOM elements (pb-prefixed)
+const pbEl = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+//  Camera sidebar
+// ---------------------------------------------------------------------------
+function pbRenderCameraList() {
+  const container = pbEl('pb-cam-list');
+  if (!container) return;
+
+  // Group cameras by location
+  const byLoc = new Map();
+  const noLoc = [];
+  for (const cam of state.cameras) {
+    if (cam.location_id) {
+      if (!byLoc.has(cam.location_id)) byLoc.set(cam.location_id, []);
+      byLoc.get(cam.location_id).push(cam);
+    } else {
+      noLoc.push(cam);
+    }
+  }
+
+  let html = '';
+  for (const loc of state.locations) {
+    const cams = byLoc.get(loc.id);
+    if (!cams || cams.length === 0) continue;
+    const hasActive = cams.some((c) => c.id === pb.cameraId);
+    html += `<div class="pb-cam-group-wrap">
+      <div class="pb-cam-group" data-loc-id="${loc.id}">
+        <svg class="pb-cam-group-chevron${hasActive ? ' open' : ''}" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.1-7-11a7 7 0 0 1 14 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>
+        ${escapeHtml(loc.name)}
+        <span class="pb-cam-group-count">${cams.length}</span>
+      </div>
+      <div class="pb-cam-group-items${hasActive ? '' : ' collapsed'}">`;
+    for (const cam of cams) {
+      const online = cam.stream_sub?.active || cam.stream?.active;
+      html += `<div class="pb-cam-item${cam.id === pb.cameraId ? ' active' : ''}" data-cam-id="${cam.id}">
+        <input type="checkbox" ${cam.id === pb.cameraId ? 'checked' : ''}>
+        <span class="pb-status-dot ${online ? 'online' : 'offline'}"></span>
+        <span class="pb-cam-name">${escapeHtml(cam.name)}</span>
+      </div>`;
+    }
+    html += `</div></div>`;
+  }
+  if (noLoc.length > 0) {
+    const hasActive = noLoc.some((c) => c.id === pb.cameraId);
+    html += `<div class="pb-cam-group-wrap">
+      <div class="pb-cam-group" data-loc-id="none">
+        <svg class="pb-cam-group-chevron${hasActive ? ' open' : ''}" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+        Tanpa Lokasi
+        <span class="pb-cam-group-count">${noLoc.length}</span>
+      </div>
+      <div class="pb-cam-group-items${hasActive ? '' : ' collapsed'}">`;
+    for (const cam of noLoc) {
+      const online = cam.stream_sub?.active || cam.stream?.active;
+      html += `<div class="pb-cam-item${cam.id === pb.cameraId ? ' active' : ''}" data-cam-id="${cam.id}">
+        <input type="checkbox" ${cam.id === pb.cameraId ? 'checked' : ''}>
+        <span class="pb-status-dot ${online ? 'online' : 'offline'}"></span>
+        <span class="pb-cam-name">${escapeHtml(cam.name)}</span>
+      </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  container.innerHTML = html || '<div style="padding:14px;color:var(--text-faint);font-size:12px">Belum ada kamera</div>';
+
+  // Attach click handlers — camera items
+  container.querySelectorAll('.pb-cam-item').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      if (e.target.type === 'checkbox') e.preventDefault(); // we handle it
+      const camId = Number(el.dataset.camId);
+      pbSelectCamera(camId);
+    });
+  });
+
+  // Attach click handlers — group headers (toggle collapse)
+  container.querySelectorAll('.pb-cam-group').forEach((el) => {
+    el.addEventListener('click', () => {
+      const items = el.nextElementSibling;
+      const chevron = el.querySelector('.pb-cam-group-chevron');
+      if (items) items.classList.toggle('collapsed');
+      if (chevron) chevron.classList.toggle('open');
+    });
+  });
+}
+
+function pbSelectCamera(camId) {
+  // Stop any active NVR playback session
+  if (pb.nvrStreamId) {
+    api('/nvr/stop', { method: 'POST', body: { stream_id: pb.nvrStreamId } }).catch(() => {});
+    pb.nvrStreamId = null;
+  }
+  if (pb.nvrHlsInstance) { pb.nvrHlsInstance.destroy(); pb.nvrHlsInstance = null; }
+
+  pb.cameraId = camId;
+  const cam = state.cameras.find((c) => c.id === camId);
+  pbEl('pb-channel-name').textContent = cam ? cam.name : `Kamera #${camId}`;
+
+  // Detect NVR-linked camera
+  pb.nvrMode = !!(cam && cam.nvr_source_id && cam.nvr_channel);
+  pb.nvrSourceId = cam?.nvr_source_id;
+  console.log('[PB Debug] selectCamera:', camId, 'nvr_source_id:', cam?.nvr_source_id, 'nvr_channel:', cam?.nvr_channel, 'nvrMode:', pb.nvrMode);
+  pb.nvrSourceId = cam?.nvr_source_id || null;
+  pb.nvrChannel = cam?.nvr_channel || null;
+
+  // Update sidebar active state
+  pbEl('pb-cam-list').querySelectorAll('.pb-cam-item').forEach((el) => {
+    const id = Number(el.dataset.camId);
+    el.classList.toggle('active', id === camId);
+    el.querySelector('input[type="checkbox"]').checked = id === camId;
+  });
+  // Refresh calendar highlights for this camera
+  pbLoadCalendarHighlights();
+}
+
+// ---------------------------------------------------------------------------
+//  Calendar
+// ---------------------------------------------------------------------------
+const PB_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+
+function pbRenderCalendar() {
+  const titleEl = pbEl('pb-cal-title');
+  const gridEl = pbEl('pb-cal-grid');
+  if (!titleEl || !gridEl) return;
+
+  titleEl.textContent = `${PB_MONTHS[pb.calMonth]} ${pb.calYear}`;
+
+  const dows = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+  let html = dows.map((d) => `<div class="dow">${d}</div>`).join('');
+
+  const firstDay = (new Date(pb.calYear, pb.calMonth, 1).getDay() + 6) % 7; // Mon=0
+  const daysInMonth = new Date(pb.calYear, pb.calMonth + 1, 0).getDate();
+  const prevMonthDays = new Date(pb.calYear, pb.calMonth, 0).getDate();
+
+  const now = new Date();
+  const todayY = now.getFullYear(), todayM = now.getMonth(), todayD = now.getDate();
+
+  // Prev month padding
+  for (let i = firstDay - 1; i >= 0; i--) {
+    html += `<div class="day other">${prevMonthDays - i}</div>`;
+  }
+  // Current month
+  for (let d = 1; d <= daysInMonth; d++) {
+    const cls = ['day'];
+    if (pb.calYear === todayY && pb.calMonth === todayM && d === todayD) cls.push('today');
+    if (d === pb.selectedDay) cls.push('selected');
+    if (pb.daysWithRecordings.has(d)) cls.push('has-rec');
+    html += `<div class="${cls.join(' ')}" data-day="${d}">${d}</div>`;
+  }
+  // Next month padding
+  const total = firstDay + daysInMonth;
+  const rem = (7 - (total % 7)) % 7;
+  for (let i = 1; i <= rem; i++) {
+    html += `<div class="day other">${i}</div>`;
+  }
+  gridEl.innerHTML = html;
+
+  // Click handler
+  gridEl.querySelectorAll('.day:not(.other)').forEach((el) => {
+    el.addEventListener('click', () => {
+      pb.selectedDay = Number(el.dataset.day);
+      pbRenderCalendar();
+    });
+  });
+}
+
+async function pbLoadCalendarHighlights() {
+  pb.daysWithRecordings.clear();
+  if (!pb.cameraId) { pbRenderCalendar(); return; }
+
+  const mm = String(pb.calMonth + 1).padStart(2, '0');
+  const lastDay = new Date(pb.calYear, pb.calMonth + 1, 0).getDate();
+
+  try {
+    if (pb.nvrMode) {
+      // Query NVR for recordings in this month
+      const from = `${pb.calYear}-${mm}-01T00:00:00`;
+      const to = `${pb.calYear}-${mm}-${String(lastDay).padStart(2, '0')}T23:59:59`;
+      const result = await api(`/nvr/search?nvr_id=${pb.nvrSourceId}&channel=${pb.nvrChannel}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+      const recs = result.recordings || result || [];
+      for (const r of recs) {
+        const t = new Date(r.startTime);
+        if (!isNaN(t)) pb.daysWithRecordings.add(t.getDate());
+      }
+    } else {
+      // Query local recordings
+      const from = `${pb.calYear}-${mm}-01 00:00:00`;
+      const to = `${pb.calYear}-${mm}-${String(lastDay).padStart(2, '0')} 23:59:59`;
+      const rows = await api(`/recordings?camera_id=${pb.cameraId}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+      for (const r of rows) {
+        const t = parseRecordingStartTimeFromFilename(r);
+        if (t) pb.daysWithRecordings.add(t.getDate());
+      }
+    }
+  } catch (e) { /* ignore */ }
+  pbRenderCalendar();
+}
+
+// Calendar navigation
+pbEl('pb-cal-prev-m')?.addEventListener('click', () => { pb.calMonth--; if (pb.calMonth < 0) { pb.calMonth = 11; pb.calYear--; } pb.selectedDay = null; pbLoadCalendarHighlights(); });
+pbEl('pb-cal-next-m')?.addEventListener('click', () => { pb.calMonth++; if (pb.calMonth > 11) { pb.calMonth = 0; pb.calYear++; } pb.selectedDay = null; pbLoadCalendarHighlights(); });
+pbEl('pb-cal-prev-y')?.addEventListener('click', () => { pb.calYear--; pb.selectedDay = null; pbLoadCalendarHighlights(); });
+pbEl('pb-cal-next-y')?.addEventListener('click', () => { pb.calYear++; pb.selectedDay = null; pbLoadCalendarHighlights(); });
+
+// ---------------------------------------------------------------------------
+//  Search — load recordings for selected camera + date
+// ---------------------------------------------------------------------------
+pbEl('pb-search-btn')?.addEventListener('click', pbSearch);
+
+async function pbSearch() {
+  if (!pb.cameraId) { showToast('Pilih kamera dulu'); return; }
+  if (!pb.selectedDay) { showToast('Pilih tanggal di kalender'); return; }
+
+  const dateStr = `${pb.calYear}-${String(pb.calMonth + 1).padStart(2, '0')}-${String(pb.selectedDay).padStart(2, '0')}`;
+  const dayStart = new Date(pb.calYear, pb.calMonth, pb.selectedDay, 0, 0, 0);
+  const dayEnd = new Date(pb.calYear, pb.calMonth, pb.selectedDay + 1, 0, 0, 0);
+  pb.dayStart = dayStart;
+
+  // Stop any existing NVR stream
+  if (pb.nvrStreamId) {
+    api('/nvr/stop', { method: 'POST', body: { stream_id: pb.nvrStreamId } }).catch(() => {});
+    pb.nvrStreamId = null;
+  }
+  if (pb.nvrHlsInstance) { pb.nvrHlsInstance.destroy(); pb.nvrHlsInstance = null; }
+
+  // Update display
+  pbEl('pb-tl-date').innerHTML = `${dateStr} <b>00:00:00</b>`;
+
+  console.log('[PB Debug] pbSearch: nvrMode=', pb.nvrMode, 'nvrSourceId=', pb.nvrSourceId, 'nvrChannel=', pb.nvrChannel, 'cameraId=', pb.cameraId);
+
+  try {
+    let motionTimes = [];
+
+    if (pb.nvrMode) {
+      // ===== NVR MODE: Search recordings on NVR via ISAPI =====
+      const from = `${dateStr}T00:00:00`;
+      const to = `${dateStr}T23:59:59`;
+      const result = await api(`/nvr/search?nvr_id=${pb.nvrSourceId}&channel=${pb.nvrChannel}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+      const nvrRecs = result.recordings || result || [];
+
+      pb.segments = nvrRecs.map((r) => {
+        const st = new Date(r.startTime);
+        const et = new Date(r.endTime);
+        return {
+          ...r,
+          startTime: st,
+          endTime: et,
+          isNvr: true,
+          nvrStartTime: r.startTime,
+          nvrEndTime: r.endTime,
+        };
+      }).filter((r) => r.startTime >= dayStart && r.startTime < dayEnd)
+        .sort((a, b) => a.startTime - b.startTime);
+
+    } else {
+      // ===== LOCAL MODE: Search recordings on this server =====
+      const padMs = 70 * 60 * 1000;
+      const qFrom = encodeURIComponent(timeToServerFormat(new Date(dayStart.getTime() - padMs)));
+      const qTo = encodeURIComponent(timeToServerFormat(new Date(dayEnd.getTime() + padMs)));
+
+      const [recordings, motionEvents] = await Promise.all([
+        api(`/recordings?camera_id=${pb.cameraId}&from=${qFrom}&to=${qTo}`),
+        api(`/events?camera_id=${pb.cameraId}&type=motion_detected&from=${qFrom}&to=${qTo}`),
+      ]);
+
+      pb.segments = recordings
+        .map((r) => ({ ...r, startTime: parseRecordingStartTimeFromFilename(r), isNvr: false }))
+        .filter((r) => r.startTime >= dayStart && r.startTime < dayEnd)
+        .sort((a, b) => a.startTime - b.startTime);
+
+      motionTimes = motionEvents
+        .map((e) => parseServerDate(e.created_at))
+        .filter((t) => t >= dayStart && t < dayEnd);
+    }
+
+    pbRenderTimeline(motionTimes);
+    pbRenderRecordingsList();
+
+    // Auto-play first segment if available
+    if (pb.segments.length > 0) {
+      pbPlaySegment(0, 0);
+    } else {
+      showToast('Tidak ada rekaman pada tanggal ini');
+    }
+  } catch (e) {
+    console.error(e);
+    showToast('Gagal memuat rekaman');
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Timeline rendering
+// ---------------------------------------------------------------------------
+function pbRenderTimeline(motionTimes) {
+  const track = pbEl('pb-tl-track');
+  const ruler = pbEl('pb-tl-ruler');
+  if (!track) return;
+
+  // Set track width based on zoom level
+  const pct = pb.zoomLevel * 100;
+  track.style.width = pct + '%';
+  if (ruler) ruler.style.width = pct + '%';
+
+  // Keep playhead and hover elements
+  const playhead = pbEl('pb-tl-playhead');
+  const hoverLine = pbEl('pb-tl-hover-line');
+  const hoverLabel = pbEl('pb-tl-hover-label');
+
+  // Clear track content except playhead/hover
+  track.innerHTML = '';
+  track.appendChild(playhead);
+  track.appendChild(hoverLine);
+  track.appendChild(hoverLabel);
+
+  const dayStart = pb.dayStart;
+  if (!dayStart) return;
+
+  // Render recording blocks
+  pb.segments.forEach((seg, i) => {
+    const startSec = (seg.startTime - dayStart) / 1000;
+    const next = pb.segments[i + 1];
+    const maxDur = next ? (next.startTime - seg.startTime) / 1000 : 600;
+    const durSec = Math.max(1, Math.min(600, maxDur, 86400 - startSec));
+    const block = document.createElement('div');
+    block.className = 'pb-tl-block continuous';
+    block.style.left = `${(startSec / 86400) * 100}%`;
+    block.style.width = `${(durSec / 86400) * 100}%`;
+    block.dataset.index = String(i);
+    block.dataset.duration = String(durSec);
+    block.title = `${seg.startTime.toLocaleTimeString('id-ID')} — ${seg.filename}`;
+    track.appendChild(block);
+  });
+
+  // Motion ticks
+  if (motionTimes) {
+    motionTimes.forEach((t) => {
+      const sec = (t - dayStart) / 1000;
+      const tick = document.createElement('div');
+      tick.className = 'pb-tl-block motion';
+      tick.style.left = `${(sec / 86400) * 100}%`;
+      tick.style.width = `${Math.max(0.15, (5 / 86400) * 100)}%`; // thin
+      tick.dataset.time = String(t.getTime());
+      tick.title = `Motion: ${t.toLocaleTimeString('id-ID')}`;
+      track.appendChild(tick);
+    });
+  }
+
+  // Ruler
+  if (ruler) {
+    const step = pb.zoomLevel >= 4 ? 1 : pb.zoomLevel >= 2 ? 2 : 2;
+    const labels = [];
+    for (let h = 0; h <= 24; h += step) labels.push(`${String(h).padStart(2, '0')}:00`);
+    ruler.innerHTML = labels.map((l) => `<span>${l}</span>`).join('');
+  }
+}
+
+// Timeline click → play at that position
+pbEl('pb-tl-track')?.addEventListener('click', (e) => {
+  if (!pb.dayStart || pb.segments.length === 0) return;
+  const track = pbEl('pb-tl-track');
+  const rect = track.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.scrollWidth));
+  const targetSec = frac * 86400;
+  const targetTime = new Date(pb.dayStart.getTime() + targetSec * 1000);
+
+  // Find the segment at this time
+  let bestIdx = -1;
+  for (let i = 0; i < pb.segments.length; i++) {
+    const seg = pb.segments[i];
+    const next = pb.segments[i + 1];
+    if (targetTime >= seg.startTime && (!next || targetTime < next.startTime)) { bestIdx = i; break; }
+  }
+  if (bestIdx < 0) {
+    for (let i = pb.segments.length - 1; i >= 0; i--) {
+      if (pb.segments[i].startTime <= targetTime) { bestIdx = i; break; }
+    }
+  }
+  if (bestIdx < 0) return;
+
+  const offset = Math.max(0, (targetTime - pb.segments[bestIdx].startTime) / 1000);
+  pbPlaySegment(bestIdx, offset);
+});
+
+// Hover tooltip
+pbEl('pb-tl-track')?.addEventListener('mousemove', (e) => {
+  const track = pbEl('pb-tl-track');
+  const hl = pbEl('pb-tl-hover-line');
+  const hlbl = pbEl('pb-tl-hover-label');
+  if (!track || !hl) return;
+  const rect = track.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const frac = Math.min(1, Math.max(0, x / rect.scrollWidth));
+  const ts = Math.floor(frac * 86400);
+  const hh = Math.floor(ts / 3600), mm = Math.floor((ts % 3600) / 60), ss = ts % 60;
+  hl.style.display = 'block';
+  hl.style.left = x + 'px';
+  hlbl.style.display = 'block';
+  hlbl.style.left = x + 'px';
+  hlbl.textContent = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+});
+pbEl('pb-tl-track')?.addEventListener('mouseleave', () => {
+  const hl = pbEl('pb-tl-hover-line');
+  const hlbl = pbEl('pb-tl-hover-label');
+  if (hl) hl.style.display = 'none';
+  if (hlbl) hlbl.style.display = 'none';
+});
+
+// Zoom
+pbEl('pb-tl-zoom-in')?.addEventListener('click', () => {
+  if (pb.zoomLevel < 8) {
+    pb.zoomLevel *= 2;
+    pbRenderTimeline();
+  }
+});
+pbEl('pb-tl-zoom-out')?.addEventListener('click', () => {
+  if (pb.zoomLevel > 1) {
+    pb.zoomLevel /= 2;
+    pbRenderTimeline();
+  }
+});
+
+// ---------------------------------------------------------------------------
+//  Recordings mini-list (right panel)
+// ---------------------------------------------------------------------------
+function pbRenderRecordingsList() {
+  const container = pbEl('pb-rec-list');
+  if (!container) return;
+
+  if (pb.segments.length === 0) {
+    container.innerHTML = '<div style="padding:6px;color:var(--text-faint);font-size:11px">Tidak ada rekaman</div>';
+    return;
+  }
+
+  container.innerHTML = pb.segments.map((seg, i) => {
+    const timeStr = seg.startTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `<div class="pb-rec-item${i === pb.currentSegIndex ? ' active' : ''}" data-index="${i}">
+      <span class="pb-rec-time">${timeStr}</span>
+      <span class="pb-rec-name">${escapeHtml(seg.filename).replace('rec_', '').replace('.mp4', '')}</span>
+      <span class="pb-rec-size">${formatBytes(seg.size_bytes)}</span>
+    </div>`;
+  }).join('');
+
+  container.querySelectorAll('.pb-rec-item').forEach((el) => {
+    el.addEventListener('click', () => {
+      pbPlaySegment(Number(el.dataset.index), 0);
+    });
+  });
+}
+
+// Toggle recordings list visibility
+pbEl('pb-rec-list-toggle')?.addEventListener('click', () => {
+  const list = pbEl('pb-rec-list');
+  const toggle = pbEl('pb-rec-list-toggle');
+  if (!list || !toggle) return;
+  list.classList.toggle('hidden');
+  toggle.classList.toggle('open');
+});
+
+// ---------------------------------------------------------------------------
+//  Video Player
+// ---------------------------------------------------------------------------
+function pbPlaySegment(index, seekTo = 0) {
+  const seg = pb.segments[index];
+  if (!seg) return;
+
+  pb.currentSegIndex = index;
+  pb.currentRecId = seg.id || null;
+
+  const video = pbEl('pb-video');
+  const placeholder = pbEl('pb-video-placeholder');
+  if (!video) return;
+
+  // Show video, hide placeholder
+  video.classList.add('active');
+  if (placeholder) placeholder.classList.add('hidden');
+
+  if (seg.isNvr) {
+    // ===== NVR MODE: Start RTSP replay → HLS via server =====
+    // Stop previous NVR stream if any
+    if (pb.nvrStreamId) {
+      api('/nvr/stop', { method: 'POST', body: { stream_id: pb.nvrStreamId } }).catch(() => {});
+      pb.nvrStreamId = null;
+    }
+    if (pb.nvrHlsInstance) { pb.nvrHlsInstance.destroy(); pb.nvrHlsInstance = null; }
+
+    // Calculate seek start time
+    let startTime = seg.nvrStartTime;
+    if (seekTo > 0 && seg.startTime) {
+      const seekDate = new Date(seg.startTime.getTime() + seekTo * 1000);
+      startTime = seekDate.toISOString().replace('.000Z', 'Z').replace('Z', '');
+      if (!startTime.includes('T')) startTime = seg.nvrStartTime;
+    }
+
+    api('/nvr/start', {
+      method: 'POST',
+      body: {
+        nvr_id: pb.nvrSourceId,
+        channel: pb.nvrChannel,
+        startTime: startTime,
+        endTime: seg.nvrEndTime,
+      },
+    }).then((result) => {
+      pb.nvrStreamId = result.stream_id;
+      const hlsUrl = result.hls_url;
+
+      // Use hls.js to play the NVR HLS stream
+      if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+        const hls = new Hls({ liveDurationInfinity: false, maxBufferLength: 30 });
+        pb.nvrHlsInstance = hls;
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          video.play().catch(() => {});
+        });
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            console.error('[NVR Playback] HLS fatal error:', data);
+            // Retry once
+            hls.destroy();
+            pb.nvrHlsInstance = null;
+          }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari native HLS
+        video.src = hlsUrl;
+        video.play().catch(() => {});
+      }
+    }).catch((e) => {
+      console.error('[NVR Playback] Failed to start:', e);
+      showToast('Gagal memulai playback dari NVR');
+    });
+
+  } else {
+    // ===== LOCAL MODE: Direct MP4 streaming =====
+    if (pb.nvrHlsInstance) { pb.nvrHlsInstance.destroy(); pb.nvrHlsInstance = null; }
+    video.src = `/api/recordings/${seg.id}/stream?token=${encodeURIComponent(state.token || '')}`;
+    video.playbackRate = pb.speeds[pb.speedIdx];
+
+    if (seekTo > 0) {
+      const onMeta = () => {
+        video.currentTime = seekTo;
+        video.removeEventListener('loadedmetadata', onMeta);
+      };
+      video.addEventListener('loadedmetadata', onMeta, { once: true });
+    }
+
+    video.play().catch(() => {});
+  }
+
+  pb.playing = true;
+  pbUpdatePlayButton();
+  pbUpdateSegButtons();
+  pbRenderRecordingsList(); // highlight active
+  pbStartPlayheadUpdate();
+
+  // Auto-advance to next segment when current ends
+  video.onended = () => {
+    if (pb.currentSegIndex < pb.segments.length - 1) {
+      pbPlaySegment(pb.currentSegIndex + 1, 0);
+    } else {
+      pb.playing = false;
+      pbUpdatePlayButton();
+      // Stop NVR stream when done
+      if (pb.nvrStreamId) {
+        api('/nvr/stop', { method: 'POST', body: { stream_id: pb.nvrStreamId } }).catch(() => {});
+        pb.nvrStreamId = null;
+      }
+    }
+  };
+}
+
+function pbStopPlayback() {
+  const video = pbEl('pb-video');
+  if (video) {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    video.classList.remove('active');
+  }
+  const placeholder = pbEl('pb-video-placeholder');
+  if (placeholder) placeholder.classList.remove('hidden');
+  pb.playing = false;
+  pb.currentSegIndex = -1;
+  pb.currentRecId = null;
+  pbUpdatePlayButton();
+  pbUpdateSegButtons();
+  pbStopPlayheadUpdate();
+}
+
+function pbUpdatePlayButton() {
+  const btn = pbEl('pb-btn-play');
+  if (!btn) return;
+  btn.classList.toggle('paused', !pb.playing);
+}
+
+function pbUpdateSegButtons() {
+  const prev = pbEl('pb-btn-prev-seg');
+  const next = pbEl('pb-btn-next-seg');
+  if (prev) prev.disabled = pb.currentSegIndex <= 0;
+  if (next) next.disabled = pb.currentSegIndex < 0 || pb.currentSegIndex >= pb.segments.length - 1;
+}
+
+// ---------------------------------------------------------------------------
+//  Playhead position (tracks video.currentTime in real-time)
+// ---------------------------------------------------------------------------
+function pbStartPlayheadUpdate() {
+  pbStopPlayheadUpdate();
+  function tick() {
+    pbUpdatePlayhead();
+    pb.playheadTimer = requestAnimationFrame(tick);
+  }
+  pb.playheadTimer = requestAnimationFrame(tick);
+}
+
+function pbStopPlayheadUpdate() {
+  if (pb.playheadTimer) {
+    cancelAnimationFrame(pb.playheadTimer);
+    pb.playheadTimer = null;
+  }
+}
+
+function pbUpdatePlayhead() {
+  const video = pbEl('pb-video');
+  const playhead = pbEl('pb-tl-playhead');
+  if (!video || !playhead || !pb.dayStart || pb.currentSegIndex < 0) return;
+
+  const seg = pb.segments[pb.currentSegIndex];
+  if (!seg) return;
+
+  const currentTimeInDay = (seg.startTime - pb.dayStart) / 1000 + (video.currentTime || 0);
+  const frac = currentTimeInDay / 86400;
+  playhead.style.left = `${frac * 100}%`;
+
+  // Update timestamp display
+  const totalSec = Math.floor(currentTimeInDay);
+  const hh = Math.floor(totalSec / 3600);
+  const mm = Math.floor((totalSec % 3600) / 60);
+  const ss = totalSec % 60;
+  const dateStr = pb.dayStart.toISOString().slice(0, 10);
+  const timeStr = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+
+  const dtEl = pbEl('pb-display-time');
+  if (dtEl) dtEl.textContent = `${dateStr} ${timeStr}`;
+  const tlDate = pbEl('pb-tl-date');
+  if (tlDate) tlDate.innerHTML = `${dateStr} <b>${timeStr}</b>`;
+}
+
+// ---------------------------------------------------------------------------
+//  Transport controls
+// ---------------------------------------------------------------------------
+// Play/Pause
+pbEl('pb-btn-play')?.addEventListener('click', () => {
+  const video = pbEl('pb-video');
+  if (!video || !video.src) return;
+  if (pb.playing) {
+    video.pause();
+    pb.playing = false;
+  } else {
+    video.play().catch(() => {});
+    pb.playing = true;
+  }
+  pbUpdatePlayButton();
+});
+
+// Stop
+pbEl('pb-btn-stop')?.addEventListener('click', pbStopPlayback);
+
+// Speed controls
+pbEl('pb-btn-fast')?.addEventListener('click', () => {
+  pb.speedIdx = Math.min(pb.speeds.length - 1, pb.speedIdx + 1);
+  pbApplySpeed();
+});
+pbEl('pb-btn-slow')?.addEventListener('click', () => {
+  pb.speedIdx = Math.max(0, pb.speedIdx - 1);
+  pbApplySpeed();
+});
+function pbApplySpeed() {
+  const video = pbEl('pb-video');
+  if (video) video.playbackRate = pb.speeds[pb.speedIdx];
+  const label = pbEl('pb-speed-label');
+  if (label) label.textContent = pb.speeds[pb.speedIdx] + '×';
+}
+
+// Frame step
+pbEl('pb-btn-frame-next')?.addEventListener('click', () => {
+  const video = pbEl('pb-video');
+  if (!video || !video.src) return;
+  video.pause();
+  pb.playing = false;
+  pbUpdatePlayButton();
+  video.currentTime = Math.min(video.duration || 0, video.currentTime + (1 / 30));
+});
+pbEl('pb-btn-frame-prev')?.addEventListener('click', () => {
+  const video = pbEl('pb-video');
+  if (!video || !video.src) return;
+  video.pause();
+  pb.playing = false;
+  pbUpdatePlayButton();
+  video.currentTime = Math.max(0, video.currentTime - (1 / 30));
+});
+
+// Segment navigation
+pbEl('pb-btn-prev-seg')?.addEventListener('click', () => {
+  if (pb.currentSegIndex > 0) pbPlaySegment(pb.currentSegIndex - 1, 0);
+});
+pbEl('pb-btn-next-seg')?.addEventListener('click', () => {
+  if (pb.currentSegIndex < pb.segments.length - 1) pbPlaySegment(pb.currentSegIndex + 1, 0);
+});
+
+// Download
+pbEl('pb-btn-download')?.addEventListener('click', () => {
+  if (pb.currentRecId == null) return;
+  const seg = pb.segments[pb.currentSegIndex];
+  if (seg) downloadRecording(seg.id, seg.filename);
+});
+
+// Screenshot
+pbEl('pb-btn-screenshot')?.addEventListener('click', () => {
+  const video = pbEl('pb-video');
+  if (!video || !video.videoWidth) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  const link = document.createElement('a');
+  link.download = `screenshot_${Date.now()}.png`;
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+  showToast('Screenshot tersimpan', 'success');
+});
+
+// Fullscreen
+pbEl('pb-btn-fullscreen')?.addEventListener('click', () => {
+  const wrap = pbEl('pb-video-wrap');
+  if (!wrap) return;
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    wrap.requestFullscreen().catch(() => {});
+  }
+});
+
+// ---------------------------------------------------------------------------
+//  Set playback time
+// ---------------------------------------------------------------------------
+pbEl('pb-time-go-btn')?.addEventListener('click', () => {
+  if (!pb.dayStart || pb.segments.length === 0) { showToast('Cari rekaman dulu'); return; }
+  const h = parseInt(pbEl('pb-time-h')?.value || '0', 10);
+  const m = parseInt(pbEl('pb-time-m')?.value || '0', 10);
+  const s = parseInt(pbEl('pb-time-s')?.value || '0', 10);
+  const targetSec = h * 3600 + m * 60 + s;
+  const targetTime = new Date(pb.dayStart.getTime() + targetSec * 1000);
+
+  // Find segment
+  let bestIdx = -1;
+  for (let i = 0; i < pb.segments.length; i++) {
+    const seg = pb.segments[i];
+    const next = pb.segments[i + 1];
+    if (targetTime >= seg.startTime && (!next || targetTime < next.startTime)) { bestIdx = i; break; }
+  }
+  if (bestIdx < 0) {
+    for (let i = pb.segments.length - 1; i >= 0; i--) {
+      if (pb.segments[i].startTime <= targetTime) { bestIdx = i; break; }
+    }
+  }
+  if (bestIdx < 0) { showToast('Tidak ada rekaman di waktu tersebut'); return; }
+  const offset = Math.max(0, (targetTime - pb.segments[bestIdx].startTime) / 1000);
+  pbPlaySegment(bestIdx, offset);
+});
+
+// ---------------------------------------------------------------------------
+//  Bookmark
+// ---------------------------------------------------------------------------
+pbEl('pb-bm-save-btn')?.addEventListener('click', async () => {
+  if (pb.currentRecId == null) { showToast('Putar rekaman dulu'); return; }
+  const note = pbEl('pb-bm-note')?.value.trim();
+  if (!note) { showToast('Isi catatan bookmark dulu'); return; }
+  const video = pbEl('pb-video');
+  try {
+    await api('/bookmarks', {
+      method: 'POST',
+      body: { recording_id: pb.currentRecId, offset_seconds: video?.currentTime || 0, note },
+    });
+    if (pbEl('pb-bm-note')) pbEl('pb-bm-note').value = '';
+    showToast('Bookmark ditambahkan', 'success');
+  } catch (e) {
+    showToast(e.message);
+  }
+});
+
+// ---------------------------------------------------------------------------
+//  Initialization — called when the "Rekaman" sub-tab is activated
+// ---------------------------------------------------------------------------
+function pbInit() {
+  pbRenderCameraList();
+  pbRenderCalendar();
+  if (pb.cameraId) pbLoadCalendarHighlights();
+}
+
+// Hook into the existing devsrv sub-tab system:
+// The existing code calls `loadRecordings()` when switching to the recordings tab.
+// We patch it so pbInit() is also called.
+const _origLoadRecordings = typeof loadRecordings === 'function' ? loadRecordings : null;
+
+// Override — call both old and new
+if (typeof window !== 'undefined') {
+  // Make pbInit callable from app.js's tab switch
+  window.pbInit = pbInit;
+  window.pbRenderCameraList = pbRenderCameraList;
+}
+
+
+
+// ==================================================================
+//  NVR Settings — JavaScript
+//  Append to app.js
+// ==================================================================
+
+let nvrSources = []; // cached list of NVR sources
+
+async function loadNvrSources() {
+  const container = $('#nvr-list');
+  if (!container) return;
+  try {
+    nvrSources = await api('/nvr/sources');
+  } catch (e) {
+    nvrSources = [];
+  }
+
+  if (nvrSources.length === 0) {
+    container.innerHTML = `<div class="nvr-empty">
+      <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      Belum ada NVR terdaftar
+    </div>`;
+    return;
+  }
+
+  container.innerHTML = nvrSources.map((nvr) => `
+    <div class="nvr-card" data-nvr-id="${nvr.id}">
+      <div class="nvr-card-icon">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      </div>
+      <div class="nvr-card-info">
+        <div class="nvr-card-name">${escapeHtml(nvr.name)}</div>
+        <div class="nvr-card-meta">
+          <span><span class="nvr-status-dot unknown"></span> ${escapeHtml(nvr.ip)}:${nvr.port}</span>
+          <span>${escapeHtml(nvr.brand || 'hikvision')}</span>
+          <span>${nvr.channels || 16} channel</span>
+          <span>RTSP :${nvr.rtsp_port || 554}</span>
+        </div>
+      </div>
+      <div class="nvr-card-actions">
+        <button class="accent" data-nvr-action="link" data-id="${nvr.id}" title="Hubungkan kamera">Kamera</button>
+        <button data-nvr-action="test" data-id="${nvr.id}" title="Test koneksi">Test</button>
+        <button data-nvr-action="edit" data-id="${nvr.id}" title="Edit">Edit</button>
+        <button class="danger" data-nvr-action="delete" data-id="${nvr.id}" title="Hapus">Hapus</button>
+      </div>
+    </div>
+  `).join('');
+
+  // Wire up action buttons
+  container.querySelectorAll('[data-nvr-action]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.dataset.id);
+      const action = btn.dataset.nvrAction;
+      if (action === 'edit') nvrEditForm(id);
+      else if (action === 'delete') nvrDelete(id);
+      else if (action === 'test') nvrTestConnection(id);
+      else if (action === 'link') nvrShowLinking(id);
+    });
+  });
+}
+
+// Show add form
+$('#nvr-add-btn')?.addEventListener('click', () => {
+  $('#nvr-form-id').value = '';
+  $('#nvr-form-title').textContent = 'Tambah NVR Baru';
+  $('#nvr-form-name').value = '';
+  $('#nvr-form-ip').value = '';
+  $('#nvr-form-port').value = '80';
+  $('#nvr-form-rtsp-port').value = '554';
+  $('#nvr-form-user').value = '';
+  $('#nvr-form-pass').value = '';
+  $('#nvr-form-pass').placeholder = 'Password NVR';
+  $('#nvr-form-brand').value = 'hikvision';
+  $('#nvr-form-channels').value = '16';
+  $('#nvr-form-msg').textContent = '';
+  $('#nvr-form-msg').className = 'form-msg';
+  // Remove old test results
+  document.querySelectorAll('.nvr-test-result').forEach((el) => el.remove());
+  $('#nvr-form-wrap').classList.remove('hidden');
+  $('#nvr-linking-section').classList.add('hidden');
+});
+
+function nvrEditForm(id) {
+  const nvr = nvrSources.find((n) => n.id === id);
+  if (!nvr) return;
+  $('#nvr-form-id').value = String(id);
+  $('#nvr-form-title').textContent = `Edit: ${nvr.name}`;
+  $('#nvr-form-name').value = nvr.name || '';
+  $('#nvr-form-ip').value = nvr.ip || '';
+  $('#nvr-form-port').value = String(nvr.port || 80);
+  $('#nvr-form-rtsp-port').value = String(nvr.rtsp_port || 554);
+  $('#nvr-form-user').value = nvr.username || '';
+  $('#nvr-form-pass').value = '';
+  $('#nvr-form-pass').placeholder = 'Kosongkan kalau tidak diubah';
+  $('#nvr-form-brand').value = nvr.brand || 'hikvision';
+  $('#nvr-form-channels').value = String(nvr.channels || 16);
+  $('#nvr-form-msg').textContent = '';
+  $('#nvr-form-msg').className = 'form-msg';
+  document.querySelectorAll('.nvr-test-result').forEach((el) => el.remove());
+  $('#nvr-form-wrap').classList.remove('hidden');
+  $('#nvr-linking-section').classList.add('hidden');
+}
+
+// Cancel form
+$('#nvr-form-cancel-btn')?.addEventListener('click', () => {
+  $('#nvr-form-wrap').classList.add('hidden');
+});
+
+// Save NVR
+$('#nvr-form-save-btn')?.addEventListener('click', async () => {
+  const id = $('#nvr-form-id').value;
+  const body = {
+    name: $('#nvr-form-name').value.trim(),
+    ip: $('#nvr-form-ip').value.trim(),
+    port: Number($('#nvr-form-port').value) || 80,
+    rtsp_port: Number($('#nvr-form-rtsp-port').value) || 554,
+    username: $('#nvr-form-user').value.trim(),
+    brand: $('#nvr-form-brand').value,
+    channels: Number($('#nvr-form-channels').value) || 16,
+  };
+  const pass = $('#nvr-form-pass').value;
+  if (pass) body.password = pass;
+
+  if (!body.name || !body.ip) {
+    showToast('Nama dan IP wajib diisi');
+    return;
+  }
+
+  const msgEl = $('#nvr-form-msg');
+  try {
+    if (id) {
+      await api(`/nvr/sources/${id}`, { method: 'PUT', body });
+      showToast('NVR berhasil diupdate', 'success');
+    } else {
+      if (!pass) { showToast('Password wajib diisi untuk NVR baru'); return; }
+      body.password = pass;
+      await api('/nvr/sources', { method: 'POST', body });
+      showToast('NVR berhasil ditambahkan', 'success');
+    }
+    $('#nvr-form-wrap').classList.add('hidden');
+    loadNvrSources();
+  } catch (e) {
+    if (msgEl) { msgEl.textContent = e.message || 'Gagal menyimpan'; msgEl.className = 'form-msg error'; }
+  }
+});
+
+// Delete NVR
+async function nvrDelete(id) {
+  const nvr = nvrSources.find((n) => n.id === id);
+  if (!nvr) return;
+  const ok = await showConfirm(`Hapus NVR "${nvr.name}"? Kamera yang terhubung akan di-unlink.`, { title: 'Hapus NVR' });
+  if (!ok) return;
+  try {
+    await api(`/nvr/sources/${id}`, { method: 'DELETE' });
+    showToast('NVR dihapus', 'success');
+    loadNvrSources();
+  } catch (e) {
+    showToast(e.message || 'Gagal menghapus NVR');
+  }
+}
+
+// Test connection
+async function nvrTestConnection(id) {
+  // Remove old test results
+  document.querySelectorAll('.nvr-test-result').forEach((el) => el.remove());
+
+  const card = document.querySelector(`.nvr-card[data-nvr-id="${id}"]`);
+  const resultEl = document.createElement('div');
+  resultEl.className = 'nvr-test-result loading';
+  resultEl.textContent = 'Menghubungi NVR...';
+
+  if (card) card.after(resultEl);
+  else $('#nvr-form-msg')?.after(resultEl) || document.body.appendChild(resultEl);
+
+  try {
+    const result = await api(`/nvr/sources/${id}/test`);
+    resultEl.className = 'nvr-test-result success';
+    const info = result.deviceInfo || result;
+    resultEl.innerHTML = `<b>✓ Koneksi berhasil!</b><br>` +
+      (info.deviceName ? `Device: ${escapeHtml(info.deviceName)}<br>` : '') +
+      (info.model ? `Model: ${escapeHtml(info.model)}<br>` : '') +
+      (info.serialNumber ? `Serial: ${escapeHtml(info.serialNumber)}<br>` : '') +
+      (info.firmwareVersion ? `Firmware: ${escapeHtml(info.firmwareVersion)}` : '');
+  } catch (e) {
+    resultEl.className = 'nvr-test-result error';
+    resultEl.innerHTML = `<b>✗ Koneksi gagal</b><br>${escapeHtml(e.message || 'Tidak bisa terhubung ke NVR')}`;
+  }
+
+  // Auto-remove after 10s
+  setTimeout(() => resultEl.remove(), 10000);
+}
+
+// Show camera-NVR linking panel
+function nvrShowLinking(nvrId) {
+  const nvr = nvrSources.find((n) => n.id === nvrId);
+  if (!nvr) return;
+
+  $('#nvr-form-wrap').classList.add('hidden');
+  $('#nvr-linking-section').classList.remove('hidden');
+  $('#nvr-linking-title').textContent = `Hubungkan Kamera ke ${nvr.name}`;
+
+  const container = $('#nvr-channel-map');
+  if (!container) return;
+
+  const channels = nvr.channels || 16;
+
+  // Build channel → camera mapping from existing camera data
+  const channelMap = {};
+  for (const cam of state.cameras) {
+    if (cam.nvr_source_id === nvrId && cam.nvr_channel) {
+      channelMap[cam.nvr_channel] = cam.id;
+    }
+  }
+
+  let html = '';
+  for (let ch = 1; ch <= channels; ch++) {
+    const selectedCamId = channelMap[ch] || '';
+    html += `<div class="nvr-channel-row">
+      <span class="nvr-channel-label">Channel ${ch}</span>
+      <select data-nvr-link-ch="${ch}" data-nvr-link-nvr="${nvrId}">
+        <option value="">— Tidak dihubungkan —</option>
+        ${state.cameras.map((c) => `<option value="${c.id}" ${c.id === selectedCamId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+      </select>
+    </div>`;
+  }
+  container.innerHTML = html;
+
+  // Store NVR id for save
+  container.dataset.nvrId = String(nvrId);
+}
+
+// Close linking panel
+$('#nvr-link-close-btn')?.addEventListener('click', () => {
+  $('#nvr-linking-section').classList.add('hidden');
+});
+
+// Save camera-NVR mapping
+$('#nvr-link-save-btn')?.addEventListener('click', async () => {
+  const container = $('#nvr-channel-map');
+  const nvrId = Number(container?.dataset.nvrId);
+  if (!nvrId) return;
+
+  const msgEl = $('#nvr-link-msg');
+  const selects = container.querySelectorAll('select[data-nvr-link-ch]');
+  let saved = 0;
+  let errors = 0;
+
+  // First: unlink all cameras that were previously linked to this NVR
+  for (const cam of state.cameras) {
+    if (cam.nvr_source_id === nvrId) {
+      try {
+        await api(`/cameras/${cam.id}`, { method: 'PUT', body: { nvr_source_id: null, nvr_channel: null } });
+      } catch (e) { errors++; }
+    }
+  }
+
+  // Then: link selected cameras
+  for (const sel of selects) {
+    const camId = Number(sel.value);
+    const channel = Number(sel.dataset.nvrLinkCh);
+    if (!camId) continue;
+    try {
+      await api(`/cameras/${camId}`, { method: 'PUT', body: { nvr_source_id: nvrId, nvr_channel: channel } });
+      saved++;
+    } catch (e) { errors++; }
+  }
+
+  // Refresh camera list
+  try { state.cameras = await api('/cameras'); } catch (e) { /* ignore */ }
+
+  if (errors === 0) {
+    showToast(`${saved} kamera berhasil dihubungkan ke NVR`, 'success');
+    if (msgEl) { msgEl.textContent = 'Mapping tersimpan!'; msgEl.className = 'form-msg success'; }
+  } else {
+    showToast(`${saved} berhasil, ${errors} gagal`, 'warning');
+    if (msgEl) { msgEl.textContent = `${errors} kamera gagal di-link`; msgEl.className = 'form-msg error'; }
+  }
+});
+
+// Load NVR list when settings tab "nvr" is activated
+// wireTabStrip already handles show/hide — we just need to load data
+const _origLoadSettings = typeof loadSettingsPage === 'function' ? loadSettingsPage : null;

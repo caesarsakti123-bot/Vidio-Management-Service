@@ -15,6 +15,12 @@
 </script>
 <title>Open VMS — Unified Video Management</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f8cff'/%3E%3Cstop offset='1' stop-color='%237c5cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='24' height='24' rx='6' fill='url(%23g)'/%3E%3Ccircle cx='12' cy='12' r='4.5' fill='white' fill-opacity='0.92'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%234f8cff'/%3E%3C/svg%3E" />
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" id="theme-color-meta" content="#0a0c10" />
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Open VMS" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@600;700;800&display=swap" rel="stylesheet" />
@@ -51,6 +57,9 @@
       <button class="alert-bell" id="theme-toggle-btn" title="Ganti tema terang/gelap">
         <svg class="theme-icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
         <svg class="theme-icon-moon hidden" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <button class="alert-bell hidden" id="install-app-btn" title="Pasang aplikasi di perangkat ini">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4-4M12 15l4-4"/><path d="M5 19h14"/></svg>
       </button>
       <button class="alert-bell" id="alert-bell-btn" title="Notifikasi">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
@@ -400,31 +409,185 @@
       </div>
 
       <div id="devsrv-subview-recordings">
-        <div class="main-header"><h2>Rekaman</h2></div>
-        <div class="stat-grid" id="recordings-stats"></div>
+<!-- ============================================================
+     PLAYBACK PAGE — replaces the content of #devsrv-subview-recordings
+     Drop this inside  <div id="devsrv-subview-recordings"> ... </div>
+     ============================================================ -->
 
-        <div class="sub-tabs" id="recordings-sub-tabs">
-          <button class="sub-tab active" data-subtab="list">Daftar Rekaman</button>
-          <button class="sub-tab" data-subtab="bookmarks">Bookmark</button>
-        </div>
+<div class="pb-layout" id="pb-layout">
 
-        <div id="recordings-subview-list">
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Kamera</th><th>File</th><th>Mulai</th><th>Ukuran</th><th></th></tr></thead>
-              <tbody id="recordings-table"></tbody>
-            </table>
-          </div>
-        </div>
+  <!-- ===== LEFT SIDEBAR — Camera list grouped by location ===== -->
+  <div class="pb-sidebar" id="pb-sidebar">
+    <div class="pb-sidebar-title">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l4.55-2.28A1 1 0 0 1 21 8.62v6.76a1 1 0 0 1-1.45.9L15 14"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg>
+      Kamera
+    </div>
+    <div class="pb-cam-list" id="pb-cam-list">
+      <!-- populated by JS: grouped by location -->
+    </div>
+  </div>
 
-        <div id="recordings-subview-bookmarks" class="hidden">
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Kamera</th><th>Waktu</th><th>Catatan</th><th>Dibuat oleh</th><th></th></tr></thead>
-              <tbody id="bookmarks-table"></tbody>
-            </table>
-          </div>
+  <!-- ===== CENTER — Video + transport ===== -->
+  <div class="pb-center">
+
+    <!-- Video header bar -->
+    <div class="pb-video-header">
+      <span>Channel: <b id="pb-channel-name">—</b></span>
+      <span class="pb-timestamp-pill" id="pb-display-time">—</span>
+    </div>
+
+    <!-- Video element -->
+    <div class="pb-video-wrap" id="pb-video-wrap">
+      <video id="pb-video" preload="metadata"></video>
+      <div class="pb-video-placeholder" id="pb-video-placeholder">
+        <svg viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l4.55-2.28A1 1 0 0 1 21 8.62v6.76a1 1 0 0 1-1.45.9L15 14"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg>
+        <div>Pilih kamera &amp; tanggal, lalu klik <b>Search</b></div>
+      </div>
+    </div>
+
+    <!-- Transport controls -->
+    <div class="pb-transport">
+      <div class="pb-transport-group">
+        <!-- Clip / export -->
+        <button class="pb-tbtn" id="pb-btn-screenshot" title="Screenshot">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        </button>
+        <div class="pb-tsep"></div>
+        <!-- Playback -->
+        <button class="pb-tbtn" id="pb-btn-frame-prev" title="Frame mundur">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+        </button>
+        <button class="pb-tbtn" id="pb-btn-slow" title="Lebih lambat">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/></svg>
+        </button>
+        <button class="pb-tbtn" id="pb-btn-stop" title="Stop">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="1.5"/></svg>
+        </button>
+        <button class="pb-tbtn pb-tbtn-play" id="pb-btn-play" title="Play">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+        <button class="pb-tbtn" id="pb-btn-fast" title="Lebih cepat">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M13 6v12l8.5-6L13 6zM4 18l8.5-6L4 6v12z"/></svg>
+        </button>
+        <button class="pb-tbtn" id="pb-btn-frame-next" title="Frame maju">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M16 18h2V6h-2zM6 18l8.5-6L6 6z"/></svg>
+        </button>
+        <div class="pb-tsep"></div>
+        <span class="pb-speed-badge" id="pb-speed-label">1×</span>
+      </div>
+      <div class="pb-transport-group">
+        <button class="pb-tbtn" id="pb-btn-prev-seg" title="Segmen sebelumnya" disabled>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </button>
+        <button class="pb-tbtn" id="pb-btn-next-seg" title="Segmen berikutnya" disabled>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+        <div class="pb-tsep"></div>
+        <button class="pb-tbtn" id="pb-btn-download" title="Download">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+        </button>
+        <button class="pb-tbtn" id="pb-btn-fullscreen" title="Fullscreen">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== RIGHT PANEL — Calendar, search, time jump, bookmark ===== -->
+  <div class="pb-panel" id="pb-panel">
+
+    <!-- Calendar -->
+    <div class="pb-card">
+      <div class="pb-cal-header">
+        <div class="pb-cal-nav-group">
+          <button class="pb-cal-nav" id="pb-cal-prev-y" title="Tahun sebelumnya">&laquo;</button>
+          <button class="pb-cal-nav" id="pb-cal-prev-m" title="Bulan sebelumnya">&lsaquo;</button>
         </div>
+        <span class="pb-cal-title" id="pb-cal-title"></span>
+        <div class="pb-cal-nav-group">
+          <button class="pb-cal-nav" id="pb-cal-next-m" title="Bulan berikutnya">&rsaquo;</button>
+          <button class="pb-cal-nav" id="pb-cal-next-y" title="Tahun berikutnya">&raquo;</button>
+        </div>
+      </div>
+      <div class="pb-cal-grid" id="pb-cal-grid"></div>
+    </div>
+
+    <!-- Search button -->
+    <button class="pb-search-btn" id="pb-search-btn">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+      Search
+    </button>
+
+    <!-- Set playback time -->
+    <div class="pb-card">
+      <div class="pb-card-title">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        Set Playback Time
+      </div>
+      <div class="pb-time-row">
+        <input type="text" class="pb-time-input" id="pb-time-h" value="00" maxlength="2" />
+        <span class="pb-time-sep">:</span>
+        <input type="text" class="pb-time-input" id="pb-time-m" value="00" maxlength="2" />
+        <span class="pb-time-sep">:</span>
+        <input type="text" class="pb-time-input" id="pb-time-s" value="00" maxlength="2" />
+        <button class="pb-time-go" id="pb-time-go-btn" title="Go">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Bookmark -->
+    <div class="pb-card">
+      <div class="pb-card-title">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+        Bookmark
+      </div>
+      <textarea class="pb-bm-textarea" id="pb-bm-note" placeholder="Catatan bookmark..."></textarea>
+      <button class="pb-bm-save" id="pb-bm-save-btn">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+        Simpan Bookmark
+      </button>
+    </div>
+
+    <!-- Recordings list (collapsed) -->
+    <div class="pb-card pb-rec-list-card">
+      <div class="pb-card-title pb-card-title-toggle" id="pb-rec-list-toggle">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>
+        Daftar Rekaman
+        <svg class="pb-toggle-chevron" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </div>
+      <div class="pb-rec-list hidden" id="pb-rec-list">
+        <!-- populated by JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== BOTTOM — Timeline ===== -->
+  <div class="pb-timeline-section">
+    <div class="pb-tl-date" id="pb-tl-date">—</div>
+    <div class="pb-tl-wrap">
+      <div class="pb-tl-zoom-btns">
+        <button class="pb-tl-zoom-btn" id="pb-tl-zoom-in" title="Zoom in">+</button>
+        <button class="pb-tl-zoom-btn" id="pb-tl-zoom-out" title="Zoom out">−</button>
+      </div>
+      <div class="pb-tl-scroll" id="pb-tl-scroll">
+        <div class="pb-tl-track" id="pb-tl-track">
+          <div class="pb-tl-playhead" id="pb-tl-playhead"></div>
+          <div class="pb-tl-hover-line" id="pb-tl-hover-line"></div>
+          <div class="pb-tl-hover-label" id="pb-tl-hover-label"></div>
+        </div>
+        <div class="pb-tl-ruler" id="pb-tl-ruler"></div>
+      </div>
+    </div>
+    <div class="pb-tl-legend">
+      <span><span class="pb-legend-dot" style="background:var(--accent)"></span>Continuous</span>
+      <span><span class="pb-legend-dot" style="background:var(--rec)"></span>Motion</span>
+      <span><span class="pb-legend-dot" style="background:var(--warn)"></span>Manual</span>
+    </div>
+  </div>
+
+</div>
+
       </div>
 
       <div id="devsrv-subview-events" class="hidden">
@@ -562,6 +725,7 @@
         <button class="sub-tab" data-settings-tab="recording">Rekaman</button>
         <button class="sub-tab" data-settings-tab="performance">Performa Live View</button>
         <button class="sub-tab" data-settings-tab="healthcheck">Health Check</button>
+        <button class="sub-tab" data-settings-tab="nvr">NVR / DVR</button>
       </div>
 
       <div id="settings-tab-branding" class="settings-section">
@@ -648,6 +812,58 @@
         <div class="settings-actions">
           <button class="btn" id="settings-save-healthcheck-btn">Simpan Health Check</button>
           <div class="form-msg" id="settings-healthcheck-msg"></div>
+        </div>
+      </div>
+
+      <div id="settings-tab-nvr" class="settings-section hidden">
+        <h3>NVR / DVR</h3>
+        <p class="field-hint" style="margin-bottom:14px">Hubungkan NVR/DVR Hikvision ke Open VMS. Rekaman yang tersimpan di NVR bisa diputar langsung dari halaman Playback tanpa menyimpan file di server ini.</p>
+
+        <div class="settings-actions" style="margin-bottom:16px">
+          <button class="btn" id="nvr-add-btn">+ Tambah NVR</button>
+        </div>
+
+        <!-- NVR List -->
+        <div id="nvr-list"></div>
+
+        <!-- NVR Form (hidden by default) -->
+        <div id="nvr-form-wrap" class="hidden">
+          <div class="nvr-form-card">
+            <h4 id="nvr-form-title">Tambah NVR Baru</h4>
+            <input type="hidden" id="nvr-form-id" value="" />
+            <div class="settings-grid">
+              <div class="field"><label>Nama NVR</label><input id="nvr-form-name" type="text" placeholder="NVR Gedung Utama" /></div>
+              <div class="field"><label>IP Address</label><input id="nvr-form-ip" type="text" placeholder="192.168.1.64" /></div>
+              <div class="field"><label>Port HTTP</label><input id="nvr-form-port" type="number" value="80" min="1" /></div>
+              <div class="field"><label>Port RTSP</label><input id="nvr-form-rtsp-port" type="number" value="554" min="1" /></div>
+              <div class="field"><label>Username</label><input id="nvr-form-user" type="text" placeholder="admin" /></div>
+              <div class="field"><label>Password</label><input id="nvr-form-pass" type="password" placeholder="Kosongkan kalau tidak diubah" /></div>
+              <div class="field"><label>Brand</label>
+                <select id="nvr-form-brand">
+                  <option value="hikvision">Hikvision</option>
+                </select>
+              </div>
+              <div class="field"><label>Jumlah Channel</label><input id="nvr-form-channels" type="number" value="16" min="1" max="128" /></div>
+            </div>
+            <div class="settings-actions" style="margin-top:12px">
+              <button class="btn" id="nvr-form-save-btn">Simpan</button>
+              <button class="btn secondary" id="nvr-form-test-btn">Test Koneksi</button>
+              <button class="btn secondary" id="nvr-form-cancel-btn">Batal</button>
+            </div>
+            <div class="form-msg" id="nvr-form-msg"></div>
+          </div>
+        </div>
+
+        <!-- Camera-NVR Linking -->
+        <div id="nvr-linking-section" class="hidden" style="margin-top:20px">
+          <h4 id="nvr-linking-title">Hubungkan Kamera ke NVR</h4>
+          <p class="field-hint" style="margin-bottom:10px">Pilih kamera untuk setiap channel NVR. Kamera yang dihubungkan akan bisa playback rekaman langsung dari NVR.</p>
+          <div id="nvr-channel-map"></div>
+          <div class="settings-actions" style="margin-top:12px">
+            <button class="btn" id="nvr-link-save-btn">Simpan Mapping</button>
+            <button class="btn secondary" id="nvr-link-close-btn">Tutup</button>
+          </div>
+          <div class="form-msg" id="nvr-link-msg"></div>
         </div>
       </div>
     </div>
@@ -1095,6 +1311,19 @@
       <button class="btn secondary" id="player-close-btn">Tutup</button>
     </div>
     <video id="player-video" controls></video>
+
+    <div class="player-toolbar">
+      <div class="player-segment-nav">
+        <button type="button" class="btn secondary" id="player-prev-segment-btn" disabled>&lsaquo; Sebelumnya</button>
+        <button type="button" class="btn secondary" id="player-next-segment-btn" disabled>Berikutnya &rsaquo;</button>
+      </div>
+      <div class="chip-group" id="player-speed-group">
+        <button type="button" class="chip active" data-speed="1">1x</button>
+        <button type="button" class="chip" data-speed="2">2x</button>
+        <button type="button" class="chip" data-speed="4">4x</button>
+        <button type="button" class="chip" data-speed="8">8x</button>
+      </div>
+    </div>
 
     <div class="player-bookmark-row">
       <input type="text" id="player-bookmark-note" placeholder="Catatan bookmark untuk posisi video saat ini..." maxlength="500" />

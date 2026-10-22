@@ -64,8 +64,33 @@ async function runHealthCheck() {
   await Promise.all(cameras.map((cam) => checkOneCamera(cam, threshold)));
 }
 
+// `state` above is in-memory only, so a server restart (deploy, crash
+// recovery) always starts it empty — without this, a camera that was
+// already offline when the process restarted reads as "online" until
+// `threshold` consecutive failures accumulate again, firing a second
+// "camera offline" email for the exact same ongoing outage with no actual
+// new transition, and no matching "online" event in between. Seed from
+// whichever of camera_offline/camera_online was logged most recently per
+// camera so that state survives a restart.
+function loadPersistedOfflineState() {
+  const rows = db.prepare(`
+    SELECT camera_id, type FROM events
+    WHERE id IN (
+      SELECT MAX(id) FROM events
+      WHERE type IN ('camera_offline', 'camera_online')
+      GROUP BY camera_id
+    )
+  `).all();
+  for (const row of rows) {
+    if (row.type === 'camera_offline') {
+      state.set(row.camera_id, { consecutiveFailures: 1, isOffline: true });
+    }
+  }
+}
+
 let intervalHandle = null;
 function startHealthCheckScheduler() {
+  loadPersistedOfflineState();
   runHealthCheck();
   const minutes = Number(settings.getSetting('health_check_interval_min')) || 5;
   intervalHandle = setInterval(runHealthCheck, minutes * 60 * 1000);

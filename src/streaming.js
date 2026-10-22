@@ -43,6 +43,17 @@ const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 30000;
 const STABLE_AFTER_MS = 10000; // running this long without exiting counts as "recovered"
 
+// RTSP URLs embed the camera's password (rtsp://user:pass@host/...), and
+// ffmpeg frequently echoes the exact failing -i argument back in its stderr
+// (connection/auth errors). getStatus() below exposes lastErrorByCamera
+// over GET /api/cameras to every role including viewer — the one field in
+// that response cameras.js didn't scrub for credentials, unlike
+// rtsp_url/username/relay_token right next to it. Redact at the point of
+// capture so it's safe no matter who reads it back.
+function redactCredentials(text) {
+  return text.replace(/(rtsp:\/\/)[^@\s/]+@/gi, '$1***:***@');
+}
+
 // stopStream() is refcounted on `viewers`, which relies on the frontend
 // always pairing every stream/start with a stream/stop — a crashed tab,
 // killed browser process, or lost network right as the stop request goes
@@ -287,6 +298,29 @@ function withJitter(delayMs) {
   return Math.round(delayMs * (0.8 + Math.random() * 0.4));
 }
 
+// Shared by the 'exit' handler's unexpected-disconnect branch and the
+// 'error' handler below — both represent "this attempt didn't work, try
+// again with backoff" and were drifting out of sync (see the 'error'
+// handler comment for what that desync caused).
+function scheduleReconnect(camera, entry, profile, key, verb) {
+  entry.retryCount = (entry.retryCount || 0) + 1;
+  const delay = withJitter(Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (entry.retryCount - 1)));
+  entry.reconnecting = true;
+  if (shouldLogRetry(entry.retryCount)) {
+    logEvent(camera.id, 'stream_reconnecting', `Live stream (${profile}) ${verb}, mencoba sambung ulang dalam ${Math.round(delay / 1000)}s (percobaan ke-${entry.retryCount})`);
+  }
+  entry.reconnectTimer = setTimeout(() => {
+    if (!activeStreams.has(key) || entry.stopRequested) return;
+    // Re-fetch instead of reusing the closed-over `camera` — otherwise an
+    // admin fixing a wrong password (or IP/RTSP path) via the Edit form
+    // has no effect on a stream that's already mid-retry: every future
+    // attempt keeps reusing the credentials it started with.
+    const fresh = getCameraById(camera.id) || camera;
+    const freshUrl = rtspUrlFor(fresh, profile);
+    spawnEncoder(fresh, entry, preferredEncoder(fresh, profile, freshUrl), profile);
+  }, delay);
+}
+
 // Re-encoding every live view (resize + libx264/QSV) burns CPU/GPU even when
 // the camera is already sending H.264 that a browser could play as-is — on a
 // host with only a handful of encode slots (see QSV/SOFTWARE_CONCURRENCY_LIMIT
@@ -451,28 +485,59 @@ function spawnEncoder(camera, entry, encoder, profile = 'main') {
     lastErrorByCamera.delete(key);
   }, STABLE_AFTER_MS);
 
+  // Node only guarantees 'error' fires when spawn() itself fails (bad
+  // FFMPEG_PATH, ENOENT, or the Windows `spawn UNKNOWN`/EMFILE burst under
+  // concurrent starts — see the SOFTWARE_CONCURRENCY_LIMIT comment above).
+  // Whether 'exit' *also* fires afterward for the same failure is
+  // unspecified by Node's docs and varies by platform/error, so `handled`
+  // guards against scheduling a reconnect twice for one failed attempt.
+  let handled = false;
+
   proc.on('error', (err) => {
+    if (handled) return;
+    handled = true;
     releaseQsvSlot();
     releaseSoftwareSlot();
     entry.alive = false;
-    activeStreams.delete(key);
+    if (entry.stableTimer) clearTimeout(entry.stableTimer);
     logEvent(camera.id, 'stream_error', `Gagal menjalankan ffmpeg (${profile}): ${err.message}`);
+
+    if (entry.stopRequested) {
+      activeStreams.delete(key);
+      logEvent(camera.id, 'stream_stopped', `Live stream (${profile}) dihentikan`);
+      return;
+    }
+    // Previously this just deleted the activeStreams entry and gave up —
+    // unlike the 'exit' handler below, leaving the camera permanently dark
+    // (status "idle", as if never started) until someone noticed and
+    // manually clicked start again. Retry with the same backoff instead.
+    scheduleReconnect(camera, entry, profile, key, 'gagal dijalankan');
   });
 
   proc.stderr.on('data', (chunk) => {
     // ffmpeg logs go to stderr by default; keep last error line for diagnostics
     const text = chunk.toString();
     if (/error|fail/i.test(text)) {
-      lastErrorByCamera.set(key, text.trim().slice(-500));
+      lastErrorByCamera.set(key, redactCredentials(text.trim().slice(-500)));
     }
   });
 
   proc.on('exit', (code) => {
+    if (handled) return;
+    handled = true;
     releaseQsvSlot();
     releaseSoftwareSlot();
     entry.alive = false;
     if (entry.stableTimer) clearTimeout(entry.stableTimer);
     const ranMs = Date.now() - startedAt;
+
+    if (entry.restartPending) {
+      entry.restartPending = false;
+      const fresh = getCameraById(camera.id) || camera;
+      const freshUrl = rtspUrlFor(fresh, profile);
+      spawnEncoder(fresh, entry, preferredEncoder(fresh, profile, freshUrl), profile);
+      return;
+    }
 
     if (entry.stopRequested) {
       activeStreams.delete(key);
@@ -513,23 +578,7 @@ function spawnEncoder(camera, entry, encoder, profile = 'main') {
     // matter how many attempts it's been: a monitoring wall left open is
     // supposed to reconnect on its own whenever the camera comes back, not
     // get stuck showing "Offline" until someone manually restarts it.
-    entry.retryCount = (entry.retryCount || 0) + 1;
-
-    const delay = withJitter(Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (entry.retryCount - 1)));
-    entry.reconnecting = true;
-    if (shouldLogRetry(entry.retryCount)) {
-      logEvent(camera.id, 'stream_reconnecting', `Live stream (${profile}) terputus, mencoba sambung ulang dalam ${Math.round(delay / 1000)}s (percobaan ke-${entry.retryCount})`);
-    }
-    entry.reconnectTimer = setTimeout(() => {
-      if (!activeStreams.has(key) || entry.stopRequested) return;
-      // Re-fetch instead of reusing the closed-over `camera` — otherwise an
-      // admin fixing a wrong password (or IP/RTSP path) via the Edit form
-      // has no effect on a stream that's already mid-retry: every future
-      // attempt keeps reusing the credentials it started with.
-      const fresh = getCameraById(camera.id) || camera;
-      const freshUrl = rtspUrlFor(fresh, profile);
-      spawnEncoder(fresh, entry, preferredEncoder(fresh, profile, freshUrl), profile);
-    }, delay);
+    scheduleReconnect(camera, entry, profile, key, 'terputus');
   });
 }
 
@@ -543,6 +592,14 @@ function startStream(camera, profile = 'main') {
     // fires, the exit handler must not tear this entry down out from under
     // them (it would otherwise trust the stale flag and kill a live view
     // that was just (re)started).
+    if (existing.stopRequested) {
+      // stopRequested was only true because a SIGTERM is already in flight
+      // for the still-alive process (see stopStream()) — flag it so the
+      // exit handler restarts immediately instead of mistaking this
+      // deliberate kill for an unexpected disconnect and queuing a 2-30s
+      // backoff reconnect for a camera that never actually failed.
+      existing.restartPending = true;
+    }
     existing.stopRequested = false;
     return existing;
   }
@@ -558,6 +615,7 @@ function startStream(camera, profile = 'main') {
     encoder: null,
     alive: false,
     stopRequested: false,
+    restartPending: false,
     reconnecting: false,
     retryCount: 0,
     queued: false,
@@ -579,6 +637,11 @@ function stopStream(cameraId, profile = 'main') {
   entry.viewers -= 1;
   if (entry.viewers <= 0) {
     entry.stopRequested = true;
+    // A restart may have been queued by a start() that landed in the gap
+    // between a previous stop's SIGTERM and this process's exit — this stop
+    // supersedes it, so the exit handler must not restart the camera right
+    // after this call deliberately stopped it again.
+    entry.restartPending = false;
     if (entry.reconnectTimer) {
       clearTimeout(entry.reconnectTimer);
       entry.reconnectTimer = null;
@@ -613,6 +676,7 @@ function stopStreamAndWait(cameraId, profile) {
   const entry = activeStreams.get(key);
   if (!entry) return Promise.resolve();
   entry.stopRequested = true;
+  entry.restartPending = false;
   if (entry.reconnectTimer) {
     clearTimeout(entry.reconnectTimer);
     entry.reconnectTimer = null;
@@ -662,13 +726,27 @@ function getStatus(cameraId, profile = 'main') {
 }
 
 function stopAll() {
-  for (const [key, entry] of activeStreams) {
+  for (const [, entry] of activeStreams) {
     entry.stopRequested = true;
+    entry.restartPending = false;
     if (entry.reconnectTimer) clearTimeout(entry.reconnectTimer);
     if (entry.stableTimer) clearTimeout(entry.stableTimer);
     if (entry.process) entry.process.kill('SIGTERM');
   }
   activeStreams.clear();
+}
+
+// Called by DELETE /api/cameras/:id (after stopStreamAndWait has already
+// settled both profiles) so per-camera entries in these module-level Maps
+// don't accumulate forever across repeated add/delete churn — none of them
+// are otherwise ever cleared for a camera id that no longer exists.
+function forgetCamera(cameraId) {
+  for (const profile of ['main', 'sub']) {
+    const key = streamKey(cameraId, profile);
+    lastErrorByCamera.delete(key);
+    videoCodecByCamera.delete(key);
+    codecProbeInFlight.delete(key);
+  }
 }
 
 // Called from index.js on every /streams/<id>/(sub/)?... request — i.e. once
@@ -687,6 +765,7 @@ function sweepIdleStreams() {
     const [cameraIdStr, profile] = key.split(':');
     const cameraId = Number(cameraIdStr);
     entry.stopRequested = true;
+    entry.restartPending = false;
     if (entry.reconnectTimer) {
       clearTimeout(entry.reconnectTimer);
       entry.reconnectTimer = null;
@@ -702,4 +781,4 @@ function sweepIdleStreams() {
 }
 setInterval(sweepIdleStreams, IDLE_SWEEP_INTERVAL_MS).unref();
 
-module.exports = { startStream, stopStream, stopStreamAndWait, getStatus, stopAll, streamDirFor, touchStream };
+module.exports = { startStream, stopStream, stopStreamAndWait, getStatus, stopAll, streamDirFor, touchStream, forgetCamera };

@@ -17,6 +17,43 @@ function generateRelayToken() {
   return crypto.randomBytes(24).toString('hex');
 }
 
+// continuousMove has no inherent stop condition of its own — the camera
+// keeps panning/tilting/zooming until an explicit 'stop' command arrives.
+// Today that only ever comes from the browser on mouseup; if the tab
+// crashes, the network drops, or the mouseup request is simply lost right
+// as it fires, nothing ever tells the camera to stop and it drifts
+// indefinitely until an operator notices and manually corrects it. This
+// server-side watchdog guarantees a stop gets sent even if the client never
+// follows up.
+const PTZ_WATCHDOG_MS = 5000;
+const ptzWatchdogs = new Map(); // cameraId -> timeout handle
+
+function clearPtzWatchdog(cameraId) {
+  const timer = ptzWatchdogs.get(cameraId);
+  if (timer) {
+    clearTimeout(timer);
+    ptzWatchdogs.delete(cameraId);
+  }
+}
+
+function armPtzWatchdog(cameraId, cam) {
+  clearPtzWatchdog(cameraId);
+  const timer = setTimeout(() => {
+    ptzWatchdogs.delete(cameraId);
+    const device = new onvif.Cam({
+      hostname: cam.ip,
+      port: cam.onvif_port || 80,
+      username: cam.username || undefined,
+      password: cam.password || undefined,
+      timeout: 8000
+    }, function (err) {
+      if (err) return; // camera unreachable — nothing more we can do from here
+      this.stop({}, () => {});
+    });
+  }, PTZ_WATCHDOG_MS);
+  ptzWatchdogs.set(cameraId, timer);
+}
+
 // `Number(x) || 0.04` would silently replace an explicit 0 (max sensitivity)
 // with the default, since 0 is falsy — only fall back when the value is
 // genuinely missing or non-numeric.
@@ -64,9 +101,19 @@ function resolveAutoLocation(name) {
 }
 
 const PRIVATE_IP_RE = /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+// `ip` is a free-text column (cameras.js does no format validation on it
+// elsewhere) — PRIVATE_IP_RE alone only rules out known-private literal
+// IPv4 prefixes, so anything that isn't a dotted-quad IPv4 at all (an
+// internal hostname like "nvr1.corp.local", an IPv6 literal, a typo) fell
+// through as "public" and got sent straight to the external geolocation API
+// below.
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 
 function isPublicIp(ip) {
-  return typeof ip === 'string' && !PRIVATE_IP_RE.test(ip);
+  if (typeof ip !== 'string') return false;
+  const match = ip.match(IPV4_RE);
+  if (!match || match.slice(1).some((octet) => Number(octet) > 255)) return false;
+  return !PRIVATE_IP_RE.test(ip);
 }
 
 // foreign_keys is ON (db.js) so an insert/update against a location_id that
@@ -106,7 +153,7 @@ function sanitizeName(name) {
 // ---- CRUD ----
 
 router.get('/', (req, res) => {
-  const cameras = db.prepare('SELECT id, name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, rtsp_path_sub, rtsp_url_sub, ptz_supported, recording_enabled, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token, serial_number, firmware_version, channel_count FROM cameras ORDER BY sort_order ASC, id ASC').all();
+  const cameras = db.prepare('SELECT id, name, brand, ip, rtsp_port, onvif_port, username, password, rtsp_path, rtsp_url, rtsp_path_sub, rtsp_url_sub, ptz_supported, recording_enabled, motion_detection_enabled, motion_sensitivity, motion_recording_enabled, location_id, building, sort_order, is_relay, relay_token, serial_number, firmware_version, channel_count, nvr_source_id, nvr_channel FROM cameras ORDER BY sort_order ASC, id ASC').all();
   const isViewer = req.user.role === 'viewer';
   const favoriteIds = new Set(
     db.prepare('SELECT camera_id FROM camera_favorites WHERE user_id = ?').all(req.user.id).map((r) => r.camera_id)
@@ -457,6 +504,9 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
     streaming.stopStreamAndWait(id),
     recording.stopRecordingAndWait(id),
   ]);
+  clearPtzWatchdog(id);
+  streaming.forgetCamera(id);
+  relay.forgetCamera(id);
   // The `recordings` row cleanup is handled by ON DELETE CASCADE (now that
   // foreign_keys is enabled, db.js), but that only removes database rows —
   // the actual video files on disk have to be removed here explicitly, or
@@ -566,8 +616,10 @@ router.post('/:id/ptz', requireRole(['admin', 'operator']), (req, res) => {
     if (err) return respond(502, { error: `Gagal konek ONVIF: ${err.message}` });
 
     if (action === 'stop') {
+      clearPtzWatchdog(id);
       this.stop({}, (err2) => respond(err2 ? 502 : 200, err2 ? { error: err2.message } : { ok: true }));
     } else {
+      armPtzWatchdog(id, cam);
       this.continuousMove({ x: pan, y: tilt, zoom }, (err2) => respond(err2 ? 502 : 200, err2 ? { error: err2.message } : { ok: true }));
     }
   });

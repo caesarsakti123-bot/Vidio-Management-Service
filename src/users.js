@@ -15,6 +15,7 @@ router.get('/', (req, res) => {
 router.post('/', (req, res) => {
   const { username, password, role } = req.body;
   if (!username || !password || !role) return res.status(400).json({ error: 'username, password, role wajib diisi' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password minimal 8 karakter' });
   if (!['admin', 'operator', 'viewer'].includes(role)) return res.status(400).json({ error: 'role tidak valid' });
 
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
@@ -35,6 +36,11 @@ router.put('/:id', (req, res) => {
   const values = [];
 
   if (password) {
+    // changeOwnPassword (auth.js) already enforces this 8-char minimum for
+    // self-service changes — this admin-facing route only checked
+    // truthiness, so an admin could set another account's password to a
+    // single character.
+    if (password.length < 8) return res.status(400).json({ error: 'Password minimal 8 karakter' });
     updates.push('password_hash = ?');
     values.push(bcrypt.hashSync(password, 10));
   }
