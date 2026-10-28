@@ -807,6 +807,21 @@ if (state.token) enterApp();
 const ALL_VIEWS = ['dashboard', 'live', 'map', 'devsrv', 'users', 'activity', 'settings', 'sop'];
 
 function showView(viewName) {
+  // NVR playback only lives inside devsrv's "Rekaman" sub-tab — leaving the
+  // "Device & Server" nav item entirely used to leak its server-side
+  // ffmpeg/HLS session (eating one of the hard-capped 5 concurrent
+  // NVR_PLAYBACK_CONCURRENCY_LIMIT slots) until the 3-minute idle sweep
+  // eventually caught it. activateDevSrvSubTab below covers switching
+  // *within* devsrv to a different sub-tab.
+  if (viewName !== 'devsrv' && pb.nvrStreamId) pbStopPlayback();
+  // Same leak, different poll: the server-health CPU/RAM timer only ever got
+  // stopped via the top-level .nav-item click handler and the devsrv sub-tab
+  // switch — the footer-only links (#sop-link, #settings-page-link,
+  // #about-sop-btn) all call showView() directly, bypassing both, so
+  // GET /api/system-health kept firing every 3s in the background after
+  // navigating to "Pengaturan Sistem" or "SOP Aplikasi" from the footer.
+  // Centralizing it here covers every path that actually leaves the view.
+  if (viewName !== 'devsrv') stopSystemHealthPolling();
   ALL_VIEWS.forEach((v) => {
     $(`#view-${v}`)?.classList.toggle('hidden', v !== viewName);
   });
@@ -1303,6 +1318,7 @@ function openBulkEditModal() {
   const msg = $('#bulk-edit-msg');
   msg.textContent = '';
   msg.className = 'form-msg';
+  $('#bulk-edit-save-btn').disabled = false;
 
   const select = $('#bulk-edit-location');
   select.innerHTML = '<option value="">Tidak ditentukan</option>' +
@@ -1324,7 +1340,9 @@ $('#bulk-edit-motion-toggle')?.addEventListener('change', (e) => {
   $('#bulk-edit-motion-fields').classList.toggle('hidden', !e.target.checked);
 });
 
-$('#bulk-edit-save-btn')?.addEventListener('click', async () => {
+$('#bulk-edit-save-btn')?.addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  if (btn.disabled) return; // already saving — ignore a fast double-click
   const msg = $('#bulk-edit-msg');
   msg.textContent = '';
   msg.className = 'form-msg';
@@ -1340,7 +1358,15 @@ $('#bulk-edit-save-btn')?.addEventListener('click', async () => {
   const body = { ids: [...state.bulkSelectedIds] };
   if (wantLocation) {
     body.location_id = $('#bulk-edit-location').value ? Number($('#bulk-edit-location').value) : null;
-    body.building = $('#bulk-edit-building').value.trim() || null;
+    // Only touch `building` if the admin actually typed something — it sits
+    // inside the "Ubah Lokasi" toggle's fields but is a logically separate
+    // value. This modal always opens with the field blank (openBulkEditModal
+    // above), so previously `building` was unconditionally sent as `null`
+    // here, silently wiping every selected camera's building on any bulk
+    // location change at all — contradicting this modal's own stated
+    // promise just above ("bagian yang tidak dicentang tidak akan disentuh").
+    const buildingValue = $('#bulk-edit-building').value.trim();
+    if (buildingValue) body.building = buildingValue;
   }
   if (wantMotion) {
     body.motion_detection_enabled = $('#bulk-edit-motion-enabled').checked;
@@ -1348,6 +1374,7 @@ $('#bulk-edit-save-btn')?.addEventListener('click', async () => {
     body.motion_sensitivity = Number($('#bulk-edit-motion-sensitivity').value) || 0.04;
   }
 
+  btn.disabled = true;
   try {
     const res = await api('/cameras/bulk', { method: 'PUT', body });
     msg.textContent = `Berhasil memperbarui ${res.updated} kamera.`;
@@ -1360,6 +1387,8 @@ $('#bulk-edit-save-btn')?.addEventListener('click', async () => {
   } catch (e) {
     msg.textContent = e.message;
     msg.classList.add('error');
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -1990,6 +2019,10 @@ async function stopPagedOutStream(id) {
 
 let focusHls = null;
 let focusCameraId = null;
+// true when focusHls is attached to the lightweight 'sub' stream as a fast
+// stand-in while the full-quality 'main' stream is still cold-starting —
+// see renderFocusModal below.
+let focusShowingSub = false;
 let gridResumeTimer = null;
 
 // Browsers cap concurrent connections per host at 6 (HTTP/1.1) — with dozens
@@ -2032,6 +2065,8 @@ function openFocusView(cameraId) {
     focusHls.destroy();
     focusHls = null;
   }
+  focusShowingSub = false;
+  stopFocusMainReadyPoll();
   resetFocusVideoElement();
   // Cancel a pending resume from a just-closed previous focus view — without
   // this, closing camera A then immediately opening camera B would let A's
@@ -2074,6 +2109,8 @@ function closeFocusView() {
     focusHls.destroy();
     focusHls = null;
   }
+  focusShowingSub = false;
+  stopFocusMainReadyPoll();
   resetFocusVideoElement();
   $('#focus-modal').classList.add('hidden');
   focusCameraId = null;
@@ -2086,6 +2123,96 @@ function closeFocusView() {
     gridResumeTimer = null;
     if ($('#focus-modal')?.classList.contains('hidden')) renderGrid();
   }, 2000);
+}
+
+// While focus view is showing the fast 'sub' preview (see renderFocusModal),
+// this probes whether the real 'main' stream's manifest file actually exists
+// on disk yet. cam.stream.active (entry.alive in streaming.js) flips true
+// the instant ffmpeg is *spawned* — well before it's connected to the camera
+// or written a first segment — so swapping on that signal alone would yank
+// the user off a perfectly good picture onto a blank/retrying one for the
+// same multi-second cold start this preview exists to hide. A manifest HEAD
+// request only succeeds once ffmpeg has actually flushed it to disk.
+let focusMainReadyPoll = null;
+const FOCUS_MAIN_READY_POLL_MS = 1500;
+
+function stopFocusMainReadyPoll() {
+  if (focusMainReadyPoll) {
+    clearInterval(focusMainReadyPoll);
+    focusMainReadyPoll = null;
+  }
+}
+
+function startFocusMainReadyPoll(cameraId) {
+  if (focusMainReadyPoll) return; // already polling
+  const url = `/streams/${cameraId}/index.m3u8`;
+  focusMainReadyPoll = setInterval(async () => {
+    if (focusCameraId !== cameraId || !focusShowingSub) {
+      stopFocusMainReadyPoll();
+      return;
+    }
+    let ready = false;
+    try {
+      ready = (await fetch(url, { method: 'HEAD' })).ok;
+    } catch (_e) {
+      // transient network hiccup — next tick retries
+    }
+    if (ready && focusCameraId === cameraId && focusShowingSub) {
+      stopFocusMainReadyPoll();
+      const cam = state.cameras.find((c) => c.id === cameraId);
+      if (cam) swapFocusToMain(cam);
+    }
+  }, FOCUS_MAIN_READY_POLL_MS);
+}
+
+// Shared by the "main already active on open" path and the sub-preview swap
+// below, so the failure/retry behavior can't silently drift between them.
+function attachFocusMainStream(cam, video, placeholder) {
+  focusHls = attachHlsPlayer(video, `/streams/${cam.id}/index.m3u8`, () => {
+    focusHls = null;
+    focusShowingSub = false;
+    // hls.js's destroy() (called just before this fires) does not
+    // reliably clear video.currentSrc back to empty in every browser —
+    // it can keep reporting the dead blob: URL indefinitely. The retry
+    // below's `!video.currentSrc` guard (in the next renderFocusModal
+    // call) then stays permanently false after the very first failure,
+    // so attachHlsPlayer() never runs again and the tile sits stuck
+    // silently (placeholder hidden, no video) no matter how many
+    // retries fire. resetFocusVideoElement() (used by openFocusView/
+    // closeFocusView already) replaces the element outright, which is
+    // the one thing that's actually proven to leave currentSrc empty.
+    resetFocusVideoElement();
+    if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
+    placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
+    placeholder.classList.remove('hidden');
+    setTimeout(async () => {
+      if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
+      // Same reasoning as startPlayer()'s retry (see its comment): don't
+      // decide off a state.cameras snapshot that can be stale by up to
+      // 15s — a slow-to-connect WAN camera can genuinely go live in that
+      // window and this would otherwise sit stuck on the old snapshot.
+      await loadCameras();
+      if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
+      const latestCam = state.cameras.find((c) => c.id === cam.id);
+      if (latestCam) renderFocusModal(latestCam);
+    }, 3000);
+  });
+}
+
+// Confirmed (via startFocusMainReadyPoll) that main's manifest actually
+// exists now — swap away from the sub preview. Reset the element first (see
+// the race explained on resetFocusVideoElement() above) rather than
+// re-attaching a second hls.js instance to the same <video> right after
+// destroying the first.
+function swapFocusToMain(cam) {
+  if (!focusShowingSub || focusCameraId !== cam.id) return;
+  focusHls?.destroy();
+  focusHls = null;
+  focusShowingSub = false;
+  const video = resetFocusVideoElement();
+  const placeholder = $('#focus-placeholder');
+  placeholder.classList.add('hidden');
+  attachFocusMainStream(cam, video, placeholder);
 }
 
 function renderFocusModal(cam) {
@@ -2107,43 +2234,51 @@ function renderFocusModal(cam) {
 
   const video = $('#focus-video');
   const placeholder = $('#focus-placeholder');
-  if (cam.stream.active) {
+
+  if (focusShowingSub) {
+    // Currently showing the fast 'sub' preview — never swap just because
+    // cam.stream.active flipped true (see startFocusMainReadyPoll's comment:
+    // that only means ffmpeg was *spawned*, not that it has produced a
+    // playable segment yet). The poll independently confirms the manifest
+    // file itself exists before swapFocusToMain() ever runs. If the sub
+    // stream itself fails, attachHlsPlayer's error callback (wired up when
+    // it was first attached below) already handles that.
+    placeholder.classList.add('hidden');
+    startFocusMainReadyPoll(cam.id);
+  } else if (cam.stream.active) {
+    // 'main' already active and we're not mid-preview — e.g. focus view was
+    // opened fresh on a camera whose main stream happened to already be
+    // running from earlier.
     placeholder.classList.add('hidden');
     if (!focusHls && !video.currentSrc) {
-      focusHls = attachHlsPlayer(video, `/streams/${cam.id}/index.m3u8`, () => {
-        focusHls = null;
-        // hls.js's destroy() (called just before this fires) does not
-        // reliably clear video.currentSrc back to empty in every browser —
-        // it can keep reporting the dead blob: URL indefinitely. The retry
-        // below's `!video.currentSrc` guard (in the next renderFocusModal
-        // call) then stays permanently false after the very first failure,
-        // so attachHlsPlayer() never runs again and the tile sits stuck
-        // silently (placeholder hidden, no video) no matter how many
-        // retries fire. resetFocusVideoElement() (used by openFocusView/
-        // closeFocusView already) replaces the element outright, which is
-        // the one thing that's actually proven to leave currentSrc empty.
-        resetFocusVideoElement();
-        if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
-        placeholder.textContent = 'Gagal memuat video, mencoba lagi...';
-        placeholder.classList.remove('hidden');
-        setTimeout(async () => {
-          if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
-          // Same reasoning as startPlayer()'s retry (see its comment): don't
-          // decide off a state.cameras snapshot that can be stale by up to
-          // 15s — a slow-to-connect WAN camera can genuinely go live in that
-          // window and this would otherwise sit stuck on the old snapshot.
-          await loadCameras();
-          if (focusCameraId !== cam.id || $('#focus-modal').classList.contains('hidden')) return;
-          const latestCam = state.cameras.find((c) => c.id === cam.id);
-          if (latestCam) renderFocusModal(latestCam);
-        }, 3000);
-      });
+      attachFocusMainStream(cam, video, placeholder);
     }
+  } else if (!cam.is_relay && cam.stream_sub?.active) {
+    // Neither main nor a sub-preview is active yet, but the grid's
+    // lightweight 'sub' stream is — that's very likely *why* the user
+    // clicked this camera in the first place. Show that immediately instead
+    // of a blank placeholder for however long main's RTSP connect + encode
+    // + first-segment-flush takes (openFocusView already kicked main off),
+    // and start polling for when it's genuinely ready to swap to.
+    placeholder.classList.add('hidden');
+    focusShowingSub = true;
+    focusHls = attachHlsPlayer(video, `/streams/${cam.id}/sub/index.m3u8`, () => {
+      focusHls = null;
+      focusShowingSub = false;
+      stopFocusMainReadyPoll();
+      // No retry of our own here — the next loadCameras() poll re-renders
+      // this modal regardless, which re-evaluates from scratch (falls
+      // through to the placeholder below if sub really did go down, or
+      // retries the sub preview if it was just a one-off hiccup).
+    });
+    startFocusMainReadyPoll(cam.id);
   } else {
+    stopFocusMainReadyPoll();
     if (focusHls) {
       focusHls.destroy();
       focusHls = null;
     }
+    focusShowingSub = false;
     video.removeAttribute('src');
     video.load();
     placeholder.classList.remove('hidden');
@@ -2305,6 +2440,7 @@ function resetCameraModal() {
 
 function openCameraModal(cam) {
   resetCameraModal();
+  $('#cam-save-btn').disabled = false;
   editingCameraId = cam ? cam.id : null;
   editingCameraWasRelay = !!cam?.is_relay;
   $('#camera-modal-title').textContent = cam ? `Edit kamera: ${cam.name}` : 'Tambah kamera';
@@ -2353,6 +2489,9 @@ $('#cam-relay-copy-btn')?.addEventListener('click', () => {
 });
 
 $('#cam-save-btn').addEventListener('click', async () => {
+  const btn = $('#cam-save-btn');
+  if (btn.disabled) return; // already saving — ignore a fast double-click
+  btn.disabled = true;
   const msg = $('#cam-form-msg');
   msg.className = 'form-msg';
   msg.textContent = '';
@@ -2394,11 +2533,19 @@ $('#cam-save-btn').addEventListener('click', async () => {
     const justBecameRelay = isRelay && result.relay_token && (!isEdit || !editingCameraWasRelay);
     if (justBecameRelay) {
       await loadCameras();
+      // The camera now exists — point the form at it (PUT, not POST) so if
+      // the user clicks "Simpan" again (easy to do: the modal stays open
+      // specifically so they can copy the agent command, and clicking Save
+      // again feels like a natural "done" action) it edits this camera
+      // instead of silently creating a duplicate with its own relay token.
+      editingCameraId = editingCameraId || result.id;
+      editingCameraWasRelay = true;
+      btn.textContent = 'Simpan perubahan';
       // Build the command from the saved camera's real rtsp_url (not the
       // form fields) — if editing and the password was left blank to keep
       // the existing one, the form field itself would be empty and produce
       // a command with a blank password.
-      const savedCam = state.cameras.find((c) => c.id === (editingCameraId || result.id));
+      const savedCam = state.cameras.find((c) => c.id === editingCameraId);
       $('#cam-relay-token-value').textContent = savedCam?.rtsp_url
         ? `node relay-agent.js --server=${window.location.origin} --token=${result.relay_token} --rtsp="${savedCam.rtsp_url}"`
         : buildRelayAgentCommand(result.relay_token);
@@ -2421,6 +2568,8 @@ $('#cam-save-btn').addEventListener('click', async () => {
   } catch (e) {
     msg.textContent = e.message;
     msg.classList.add('error');
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -3035,7 +3184,7 @@ function renderDeviceTable() {
       const online = cam.network_status === 'online';
       return `
         <tr>
-          <td><a href="#" class="device-name-link" data-device-action="detail" data-id="${cam.id}">${escapeHtml(cam.name)}</a></td>
+          <td>${canEdit ? `<a href="#" class="device-name-link" data-device-action="detail" data-id="${cam.id}">${escapeHtml(cam.name)}</a>` : escapeHtml(cam.name)}</td>
           <td>${escapeHtml(cam.ip)}</td>
           <td>${escapeHtml(cam.serial_number || '-')}</td>
           <td>${escapeHtml(cam.firmware_version || '-')}</td>
@@ -3322,6 +3471,10 @@ const activateDevSrvSubTab = wireTabStrip('#devsrv-sub-tabs', {
   onSwitch: (tab) => {
     devsrvSubTab = tab;
     stopSystemHealthPolling(); // only the 'system' branch below restarts it
+    // Same reasoning as showView()'s guard — NVR playback only lives in the
+    // 'recordings' sub-tab, so leaving it for events/health/system must stop
+    // any active server-side session instead of leaking it.
+    if (tab !== 'recordings' && pb.nvrStreamId) pbStopPlayback();
     // loadRecordings() used to run here too, but it only ever populated
     // #recordings-table/#recordings-stats — both replaced by the pb-* NVR
     // playback page below and no longer present in index.html, so it was
@@ -3354,7 +3507,13 @@ function initMapIfNeeded() {
       attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19,
     }).addTo(leafletMap);
-    leafletMap.on('click', (e) => openLocationModal(null, e.latlng));
+    // Same edit-permission gating as the equivalent #add-location-btn
+    // (hidden for viewers, index.html) — the POST would just 403 server-side
+    // anyway, but a viewer clicking the map shouldn't be invited into an
+    // "Add Location" form they can't actually use in the first place.
+    leafletMap.on('click', (e) => {
+      if (state.user.role !== 'viewer') openLocationModal(null, e.latlng);
+    });
   }
 }
 
@@ -3565,7 +3724,16 @@ async function deleteLocation(loc) {
   if (!(await showConfirm(`Hapus lokasi "${loc.name}"? Kamera yang terhubung tidak akan terhapus, hanya lepas dari lokasi ini.`, { title: 'Hapus Lokasi' }))) return;
   try {
     await api(`/locations/${loc.id}`, { method: 'DELETE' });
-    await loadLocations();
+    // The backend nulls every affected camera's location_id, but
+    // state.cameras itself only refreshes on the next 15s poll — if this
+    // location was the active Live-view filter, leaving it set would make
+    // getVisibleCameras() match zero cameras (now-dangling location_id) the
+    // moment that poll lands, silently emptying the grid later with nothing
+    // to explain why. Clear it now and refresh cameras immediately instead
+    // of waiting on the poll.
+    if (state.locationFilter === loc.id) state.locationFilter = null;
+    if (state.buildingFilter?.locationId === loc.id) state.buildingFilter = null;
+    await Promise.all([loadLocations(), loadCameras()]);
   } catch (e) {
     showToast(e.message);
   }
@@ -4330,7 +4498,11 @@ function renderSystemHealth(data) {
       { tone: usageTone(cpu.percent), value: `${cpu.percent}%`, label: `CPU (${cpu.core_count} core)` },
       { tone: usageTone(memory.percent), value: `${memory.percent}%`, label: 'RAM terpakai' },
       { tone: 'neutral', value: formatDuration(system.uptime_seconds * 1000), label: 'Waktu aktif server' },
-      { tone: 'neutral', value: cpu.load_average[0] ? cpu.load_average[0].toFixed(2) : '-', label: 'Load average (1 menit)' },
+      // `? :` on the raw number would treat a real 0 as "no data" — and
+      // system_health.js explicitly documents os.loadavg() as *always*
+      // [0,0,0] on Windows, so every Windows deployment permanently showed
+      // "-" here even though 0 is the accurate value.
+      { tone: 'neutral', value: Number.isFinite(cpu.load_average?.[0]) ? cpu.load_average[0].toFixed(2) : '-', label: 'Load average (1 menit)' },
     ];
     statsEl.innerHTML = tiles.map((t) => `
       <div class="stat-tile">
@@ -4700,7 +4872,13 @@ async function loadSettingsPage() {
 // reload the whole settings form afterward either: doing so would overwrite
 // any not-yet-saved text the admin has typed into a *different* section's
 // inputs while they were on this page.
-async function saveSettingsSection(msgSelector, body, afterSave) {
+// `btn` disable/re-enable guard added here (and to test-email below) since
+// none of these had one — a fast double-click (or mashing it while waiting)
+// used to fire two concurrent PUTs, and for test-email specifically, two
+// concurrent *real emails* sent to whoever's configured as notify_email_to.
+async function saveSettingsSection(btn, msgSelector, body, afterSave) {
+  if (btn.disabled) return;
+  btn.disabled = true;
   const msg = $(msgSelector);
   msg.textContent = '';
   msg.className = 'form-msg';
@@ -4712,14 +4890,16 @@ async function saveSettingsSection(msgSelector, body, afterSave) {
   } catch (e) {
     msg.textContent = e.message;
     msg.classList.add('error');
+  } finally {
+    btn.disabled = false;
   }
 }
 
-$('#settings-save-branding-btn')?.addEventListener('click', () => saveSettingsSection('#settings-branding-msg', {
+$('#settings-save-branding-btn')?.addEventListener('click', (e) => saveSettingsSection(e.currentTarget, '#settings-branding-msg', {
   app_name: $('#settings-app-name').value.trim() || 'Open VMS',
 }, loadBranding));
 
-$('#settings-save-email-btn')?.addEventListener('click', () => saveSettingsSection('#settings-email-msg', {
+$('#settings-save-email-btn')?.addEventListener('click', (e) => saveSettingsSection(e.currentTarget, '#settings-email-msg', {
   smtp_enabled: $('#settings-smtp-enabled').checked ? 'true' : 'false',
   smtp_host: $('#settings-smtp-host').value.trim(),
   smtp_port: $('#settings-smtp-port').value.trim(),
@@ -4732,22 +4912,25 @@ $('#settings-save-email-btn')?.addEventListener('click', () => saveSettingsSecti
   $('#settings-smtp-pass').placeholder = 'Sudah diatur — kosongkan kalau tidak diubah';
 }));
 
-$('#settings-save-recording-btn')?.addEventListener('click', () => saveSettingsSection('#settings-recording-msg', {
+$('#settings-save-recording-btn')?.addEventListener('click', (e) => saveSettingsSection(e.currentTarget, '#settings-recording-msg', {
   retention_days: $('#settings-retention').value.trim(),
 }));
 
-$('#settings-save-performance-btn')?.addEventListener('click', () => saveSettingsSection('#settings-performance-msg', {
+$('#settings-save-performance-btn')?.addEventListener('click', (e) => saveSettingsSection(e.currentTarget, '#settings-performance-msg', {
   stream_max_width: $('#settings-stream-width').value.trim(),
   stream_fps: $('#settings-stream-fps').value.trim(),
   hwaccel_mode: $('#settings-hwaccel').value,
 }));
 
-$('#settings-save-healthcheck-btn')?.addEventListener('click', () => saveSettingsSection('#settings-healthcheck-msg', {
+$('#settings-save-healthcheck-btn')?.addEventListener('click', (e) => saveSettingsSection(e.currentTarget, '#settings-healthcheck-msg', {
   health_check_interval_min: $('#settings-health-interval').value.trim(),
   offline_threshold_checks: $('#settings-offline-threshold').value.trim(),
 }));
 
-$('#settings-test-email-btn')?.addEventListener('click', async () => {
+$('#settings-test-email-btn')?.addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  if (btn.disabled) return;
+  btn.disabled = true;
   const msg = $('#settings-email-msg');
   msg.textContent = 'Mengirim...';
   msg.className = 'form-msg';
@@ -4755,9 +4938,11 @@ $('#settings-test-email-btn')?.addEventListener('click', async () => {
     await api('/settings/test-email', { method: 'POST' });
     msg.textContent = 'Email test berhasil dikirim — cek inbox tujuan.';
     msg.classList.add('ok');
-  } catch (e) {
-    msg.textContent = e.message;
+  } catch (e2) {
+    msg.textContent = e2.message;
     msg.classList.add('error');
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -4922,6 +5107,9 @@ $('#alert-ack-all-btn')?.addEventListener('click', async (e) => {
 // ---------------------------------------------------------------------------
 //  Playback Page State
 // ---------------------------------------------------------------------------
+// Bumped on every NVR /start call — lets a response recognize whether a
+// newer pbPlaySegment() call has since superseded it (see pbPlaySegment).
+let pbNvrStartSeq = 0;
 const pb = {
   cameraId: null,          // selected camera id
   calYear: new Date().getFullYear(),
@@ -5034,14 +5222,20 @@ function pbRenderCameraList() {
 }
 
 function pbSelectCamera(camId) {
-  // Stop any active NVR playback session
-  if (pb.nvrStreamId) {
-    api('/nvr/stop', { method: 'POST', body: { stream_id: pb.nvrStreamId } }).catch(() => {});
-    pb.nvrStreamId = null;
-  }
-  if (pb.nvrHlsInstance) { pb.nvrHlsInstance.destroy(); pb.nvrHlsInstance = null; }
+  // Stop whatever's currently playing — NVR session + hls.js, or a local
+  // <video> streaming a recording — not just the NVR case. Switching
+  // cameras used to leave a previous camera's local recording playing
+  // (audibly/visibly) with the channel-name label already showing the new
+  // camera, since only the NVR branch was ever stopped here.
+  pbStopPlayback();
 
   pb.cameraId = camId;
+  // Previous camera's segment list/timeline means nothing for the new one —
+  // clear it instead of leaving stale entries on screen until the next
+  // explicit "Cari".
+  pb.segments = [];
+  pbRenderRecordingsList();
+  pbRenderTimeline([]);
   const cam = state.cameras.find((c) => c.id === camId);
   pbEl('pb-channel-name').textContent = cam ? cam.name : `Kamera #${camId}`;
 
@@ -5436,10 +5630,26 @@ function pbPlaySegment(index, seekTo = 0) {
     let startTime = seg.nvrStartTime;
     if (seekTo > 0 && seg.startTime) {
       const seekDate = new Date(seg.startTime.getTime() + seekTo * 1000);
-      startTime = seekDate.toISOString().replace('.000Z', 'Z').replace('Z', '');
-      if (!startTime.includes('T')) startTime = seg.nvrStartTime;
+      // nvrStartTime/nvrEndTime (and the from/to search params) are naive
+      // *local*-wall-clock strings with no timezone suffix — that's exactly
+      // why pbSearch's `new Date(r.startTime)` parses correctly as local
+      // time (no 'Z' = local, per the JS date-string spec). toISOString()
+      // instead formats in UTC, silently shifting this seek target by the
+      // browser's UTC offset (e.g. 7h off in WIB) versus every other naive
+      // string this code sends to the same NVR. Build a local-wall-clock
+      // string instead.
+      const pad = (n) => String(n).padStart(2, '0');
+      startTime = `${seekDate.getFullYear()}-${pad(seekDate.getMonth() + 1)}-${pad(seekDate.getDate())}T${pad(seekDate.getHours())}:${pad(seekDate.getMinutes())}:${pad(seekDate.getSeconds())}`;
     }
 
+    // Two quick clicks (a different segment, or "next-seg") before the first
+    // /nvr/start response lands used to race: the "stop previous" guard
+    // above only catches an *already-resolved* session, so the slower
+    // response would silently overwrite pb.nvrStreamId/nvrHlsInstance and
+    // orphan the other one — permanently eating one of the hard-capped 5
+    // concurrent slots. pbStartSeq lets a superseded response recognize
+    // itself and stop its own (now unwanted) session instead of using it.
+    const startSeq = ++pbNvrStartSeq;
     api('/nvr/start', {
       method: 'POST',
       body: {
@@ -5449,6 +5659,10 @@ function pbPlaySegment(index, seekTo = 0) {
         endTime: seg.nvrEndTime,
       },
     }).then((result) => {
+      if (startSeq !== pbNvrStartSeq) {
+        api('/nvr/stop', { method: 'POST', body: { stream_id: result.stream_id } }).catch(() => {});
+        return;
+      }
       pb.nvrStreamId = result.stream_id;
       const hlsUrl = result.hls_url;
 
@@ -5464,9 +5678,20 @@ function pbPlaySegment(index, seekTo = 0) {
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
             console.error('[NVR Playback] HLS fatal error:', data);
-            // Retry once
+            // The comment here used to say "Retry once" but never actually
+            // did — just destroyed the instance and left playback frozen
+            // with the Play button still showing "playing" and nothing
+            // telling the user why. Surface it and reset state instead,
+            // same reasoning as live view's createHlsErrorHandler.
             hls.destroy();
             pb.nvrHlsInstance = null;
+            if (pb.nvrStreamId) {
+              api('/nvr/stop', { method: 'POST', body: { stream_id: pb.nvrStreamId } }).catch(() => {});
+              pb.nvrStreamId = null;
+            }
+            pb.playing = false;
+            pbUpdatePlayButton();
+            showToast('Playback NVR terhenti karena error, coba putar lagi');
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -5475,8 +5700,15 @@ function pbPlaySegment(index, seekTo = 0) {
         video.play().catch(() => {});
       }
     }).catch((e) => {
+      if (startSeq !== pbNvrStartSeq) return; // superseded by a newer segment click — not a real failure
       console.error('[NVR Playback] Failed to start:', e);
-      showToast('Gagal memulai playback dari NVR');
+      // Surface the backend's actual message (e.g. the 429 "Batas 5 sesi
+      // playback NVR bersamaan tercapai..." text) instead of a generic
+      // message that hides which error — including a plain capacity limit —
+      // actually happened.
+      showToast(e.message || 'Gagal memulai playback dari NVR');
+      pb.playing = false;
+      pbUpdatePlayButton();
     });
 
   } else {
@@ -5526,6 +5758,16 @@ function pbStopPlayback() {
     video.load();
     video.classList.remove('active');
   }
+  // Previously only paused the client-side <video> — never told the backend
+  // to tear down the ffmpeg/HLS session it spawned for NVR playback, which
+  // then sat consuming one of the hard-capped 5 concurrent
+  // NVR_PLAYBACK_CONCURRENCY_LIMIT slots (src/nvr_playback.js) until the
+  // 3-minute idle sweep eventually caught it.
+  if (pb.nvrStreamId) {
+    api('/nvr/stop', { method: 'POST', body: { stream_id: pb.nvrStreamId } }).catch(() => {});
+    pb.nvrStreamId = null;
+  }
+  if (pb.nvrHlsInstance) { pb.nvrHlsInstance.destroy(); pb.nvrHlsInstance = null; }
   const placeholder = pbEl('pb-video-placeholder');
   if (placeholder) placeholder.classList.remove('hidden');
   pb.playing = false;
@@ -5535,6 +5777,24 @@ function pbStopPlayback() {
   pbUpdateSegButtons();
   pbStopPlayheadUpdate();
 }
+
+// Closing the tab or navigating fully away from the app (not just switching
+// sub-tabs within it — showView()/activateDevSrvSubTab's onSwitch already
+// cover that) used to leak the server-side NVR session with nothing to stop
+// it, since no unload handler existed anywhere in this file. A normal
+// fetch()/api() call made during pagehide is unreliable (browsers routinely
+// cancel in-flight requests once the page starts tearing down) — sendBeacon
+// is specifically designed to still deliver in that situation. The token
+// travels as a query param (same fallback auth.js already supports for
+// <video>/<a> elements, since sendBeacon can't set an Authorization header),
+// and the body is sent as an explicitly application/json Blob since
+// sendBeacon defaults to text/plain, which express.json() wouldn't parse.
+window.addEventListener('pagehide', () => {
+  if (!pb.nvrStreamId || !navigator.sendBeacon) return;
+  const url = `/api/nvr/stop?token=${encodeURIComponent(state.token || '')}`;
+  const blob = new Blob([JSON.stringify({ stream_id: pb.nvrStreamId })], { type: 'application/json' });
+  navigator.sendBeacon(url, blob);
+});
 
 function pbUpdatePlayButton() {
   const btn = pbEl('pb-btn-play');
